@@ -20,8 +20,12 @@ struct CaptureView: View {
                 ZStack {
                     ForEach(capture.gridPoints) { point in
                         if let offset = screenOffset(for: point, in: geo.size) {
-                            MarkerView(captured: point.captured, isAligned: capture.alignedPointID == point.id)
-                                .position(x: geo.size.width / 2 + offset.x, y: geo.size.height / 2 + offset.y)
+                            MarkerView(
+                                captured: point.captured,
+                                isAligned: capture.alignedPointID == point.id,
+                                thumbnail: capture.capturedThumbnails[point.id]
+                            )
+                            .position(x: geo.size.width / 2 + offset.x, y: geo.size.height / 2 + offset.y)
                         }
                     }
 
@@ -51,6 +55,17 @@ struct CaptureView: View {
                             .padding(12)
                             .background(.black.opacity(0.5), in: Circle())
                     }
+
+                    Button {
+                        capture.toggleTorch()
+                    } label: {
+                        Image(systemName: capture.isTorchOn ? "bolt.fill" : "bolt.slash.fill")
+                            .font(.title2)
+                            .foregroundStyle(capture.isTorchOn ? .yellow : .white)
+                            .padding(12)
+                            .background(.black.opacity(0.5), in: Circle())
+                    }
+                    .padding(.leading, 8)
 
                     Spacer()
 
@@ -143,12 +158,24 @@ struct CaptureView: View {
 private struct MarkerView: View {
     let captured: Bool
     let isAligned: Bool
+    let thumbnail: UIImage?
 
     var body: some View {
-        Circle()
-            .strokeBorder(captured ? Color.green : (isAligned ? Color.yellow : Color.white), lineWidth: isAligned ? 4 : 2)
-            .background(Circle().fill(captured ? Color.green.opacity(0.3) : Color.clear))
-            .frame(width: isAligned ? 46 : 36, height: isAligned ? 46 : 36)
+        let size: CGFloat = isAligned ? 46 : 36
+        Group {
+            if captured, let thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size, height: size)
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(Color.green, lineWidth: 2))
+            } else {
+                Circle()
+                    .strokeBorder(isAligned ? Color.yellow : Color.white, lineWidth: isAligned ? 4 : 2)
+                    .frame(width: size, height: size)
+            }
+        }
     }
 }
 

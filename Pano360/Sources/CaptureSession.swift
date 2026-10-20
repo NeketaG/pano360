@@ -1,4 +1,5 @@
 import ARKit
+import AVFoundation
 import CoreLocation
 import simd
 import UIKit
@@ -34,6 +35,8 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     @Published var statusText = "Наведи камеру и поворачивайся по кругу"
     @Published var lastCapturedImage: UIImage?
     @Published var canUndo = false
+    @Published var capturedThumbnails: [GridPoint.ID: UIImage] = [:]
+    @Published var isTorchOn = false
 
     private let captureToleranceDeg: Float = 6
     private let stabilizeSeconds: TimeInterval = 0.4
@@ -94,6 +97,30 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     func stop() {
         session.pause()
         locationManager.stopUpdatingLocation()
+        if isTorchOn { setTorch(false) }
+    }
+
+    func toggleTorch() {
+        setTorch(!isTorchOn)
+    }
+
+    private func setTorch(_ on: Bool) {
+        guard
+            let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+            device.hasTorch
+        else { return }
+        do {
+            try device.lockForConfiguration()
+            if on {
+                try device.setTorchModeOn(level: 1.0)
+            } else {
+                device.torchMode = .off
+            }
+            device.unlockForConfiguration()
+            isTorchOn = on
+        } catch {
+            // не критично, если переключить вспышку не удалось
+        }
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
@@ -195,6 +222,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                     self.gridPoints[idx].captured = true
                 }
                 self.captureHistory.append(CaptureHistoryEntry(pointID: point.id, fileName: fileName, thumbnail: thumbnail))
+                self.capturedThumbnails[point.id] = thumbnail
                 self.lastCapturedImage = thumbnail
                 self.canUndo = true
                 self.alignedPointID = nil
@@ -214,6 +242,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         if let idx = gridPoints.firstIndex(where: { $0.id == last.pointID }) {
             gridPoints[idx].captured = false
         }
+        capturedThumbnails[last.pointID] = nil
         manifestEntries.removeAll { ($0["file"] as? String) == last.fileName }
         try? FileManager.default.removeItem(at: outputDirectory.appendingPathComponent(last.fileName))
         lastCapturedImage = captureHistory.last?.thumbnail

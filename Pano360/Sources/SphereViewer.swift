@@ -26,6 +26,11 @@ struct SphereViewer: UIViewRepresentable {
         sphere.firstMaterial?.lightingModel = .constant
 
         let sphereNode = SCNNode(geometry: sphere)
+        // Без этого разворота текстура изнутри сферы видна зеркально (классическая
+        // особенность сфер-скайбоксов: при взгляде изнутри направление "вправо по
+        // текстуре" меняется на обратное). Файл на диске при этом не зеркалится —
+        // это только про то, как рисует сцену SceneKit.
+        sphereNode.scale = SCNVector3(-1, 1, 1)
         scene.rootNode.addChildNode(sphereNode)
 
         let cameraNode = SCNNode()

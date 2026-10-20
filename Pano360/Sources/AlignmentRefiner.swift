@@ -69,6 +69,11 @@ enum AlignmentRefiner {
         guard let observation = request.results?.first as? VNImageHomographicAlignmentObservation else {
             return nil
         }
+        // В темноте или на однотонных поверхностях Vision иногда выдаёт результат
+        // с низкой уверенностью — он формально похож на правду (проходит проверку
+        // угла поворота дальше), но на деле случайный. Лучше в этом случае не трогать
+        // исходную ориентацию ARKit, чем применить мусорную коррекцию.
+        guard observation.confidence > 0.5 else { return nil }
 
         let hPixel = pixelHomography(
             fromNormalized: observation.warpTransform,
