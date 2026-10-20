@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import simd
+import UniformTypeIdentifiers
 
 struct FrameRecord {
     let fileURL: URL
@@ -16,14 +17,23 @@ struct FrameRecord {
     let cy: Float
 }
 
+struct PanoramaManifest {
+    let frames: [FrameRecord]
+    let latitude: Double?
+    let longitude: Double?
+}
+
 enum PanoramaStitcher {
-    static func loadManifest(sessionDirectory: URL) throws -> [FrameRecord] {
+    static func loadManifest(sessionDirectory: URL) throws -> PanoramaManifest {
         let manifestURL = sessionDirectory.appendingPathComponent("manifest.json")
         let data = try Data(contentsOf: manifestURL)
-        guard let entries = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        guard
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let entries = root["frames"] as? [[String: Any]]
+        else {
             throw NSError(domain: "PanoramaStitcher", code: 1, userInfo: [NSLocalizedDescriptionKey: "Повреждён manifest.json"])
         }
-        return entries.compactMap { entry in
+        let frames: [FrameRecord] = entries.compactMap { entry in
             guard
                 let file = entry["file"] as? String,
                 let yaw = entry["yawRad"] as? Double,
@@ -44,6 +54,54 @@ enum PanoramaStitcher {
                 forward: SIMD3<Float>(Float(forwardX), Float(forwardY), Float(forwardZ)),
                 fx: Float(fx), fy: Float(fy), cx: Float(cx), cy: Float(cy)
             )
+        }
+        return PanoramaManifest(frames: frames, latitude: root["latitude"] as? Double, longitude: root["longitude"] as? Double)
+    }
+
+    /// Сохраняет готовую панораму как JPEG с метаданными Google Photo Sphere (XMP GPano),
+    /// чтобы просмотрщики вроде Google Фото распознавали её как интерактивную панораму,
+    /// и с GPS-координатами съёмки, если они известны.
+    static func writeEquirectangularJPEG(_ cgImage: CGImage, to url: URL, latitude: Double?, longitude: Double?) throws {
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+            throw NSError(domain: "PanoramaStitcher", code: 2, userInfo: [NSLocalizedDescriptionKey: "Не удалось создать файл"])
+        }
+
+        var properties: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: 0.92
+        ]
+        if let latitude, let longitude {
+            properties[kCGImagePropertyGPSDictionary] = [
+                kCGImagePropertyGPSVersion: "2.2.0.0",
+                kCGImagePropertyGPSLatitude: abs(latitude),
+                kCGImagePropertyGPSLatitudeRef: latitude >= 0 ? "N" : "S",
+                kCGImagePropertyGPSLongitude: abs(longitude),
+                kCGImagePropertyGPSLongitudeRef: longitude >= 0 ? "E" : "W"
+            ] as [CFString: Any]
+        }
+
+        let metadata = CGImageMetadataCreateMutable()
+        let gpanoNamespace = "http://ns.google.com/photos/1.0/panorama/" as CFString
+        CGImageMetadataRegisterNamespaceForPrefix(metadata, gpanoNamespace, "GPano" as CFString, nil)
+
+        func setGPano(_ name: String, _ value: String) {
+            guard let tag = CGImageMetadataTagCreate(gpanoNamespace, "GPano" as CFString, name as CFString, .default, value as CFTypeRef) else { return }
+            CGImageMetadataSetTagWithPath(metadata, nil, "GPano:\(name)" as CFString, tag)
+        }
+
+        setGPano("UsePanoramaViewer", "True")
+        setGPano("ProjectionType", "equirectangular")
+        setGPano("FullPanoWidthPixels", "\(cgImage.width)")
+        setGPano("FullPanoHeightPixels", "\(cgImage.height)")
+        setGPano("CroppedAreaImageWidthPixels", "\(cgImage.width)")
+        setGPano("CroppedAreaImageHeightPixels", "\(cgImage.height)")
+        setGPano("CroppedAreaLeftPixels", "0")
+        setGPano("CroppedAreaTopPixels", "0")
+
+        guard CGImageDestinationAddImageAndMetadata(destination, cgImage, metadata, properties as CFDictionary) else {
+            throw NSError(domain: "PanoramaStitcher", code: 3, userInfo: [NSLocalizedDescriptionKey: "Не удалось записать метаданные"])
+        }
+        guard CGImageDestinationFinalize(destination) else {
+            throw NSError(domain: "PanoramaStitcher", code: 4, userInfo: [NSLocalizedDescriptionKey: "Не удалось сохранить файл"])
         }
     }
 

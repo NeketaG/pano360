@@ -1,4 +1,5 @@
 import ARKit
+import CoreLocation
 import simd
 import UIKit
 
@@ -20,8 +21,10 @@ private struct CaptureHistoryEntry {
     let thumbnail: UIImage
 }
 
-final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
+final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLocationManagerDelegate {
     let session = ARSession()
+    private let locationManager = CLLocationManager()
+    private var lastLocation: CLLocation?
 
     @Published var gridPoints: [GridPoint]
     @Published var currentYaw: Float = 0
@@ -81,10 +84,20 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
         session.delegate = self
         let config = AROrientationTrackingConfiguration()
         session.run(config)
+
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.requestWhenInUseAuthorization()
+        locationManager.startUpdatingLocation()
     }
 
     func stop() {
         session.pause()
+        locationManager.stopUpdatingLocation()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        lastLocation = locations.last
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
@@ -222,8 +235,15 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
     private func finish() {
         isFinished = true
         statusText = "Готово! Снято \(gridPoints.count) кадров"
+
+        var manifest: [String: Any] = ["frames": manifestEntries]
+        if let coordinate = lastLocation?.coordinate {
+            manifest["latitude"] = coordinate.latitude
+            manifest["longitude"] = coordinate.longitude
+        }
+
         let manifestURL = outputDirectory.appendingPathComponent("manifest.json")
-        if let data = try? JSONSerialization.data(withJSONObject: manifestEntries, options: [.prettyPrinted]) {
+        if let data = try? JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted]) {
             try? data.write(to: manifestURL)
         }
         stop()

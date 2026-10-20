@@ -7,6 +7,8 @@ struct StitchView: View {
 
     @State private var progress: Double = 0
     @State private var resultImage: UIImage?
+    @State private var latitude: Double?
+    @State private var longitude: Double?
     @State private var errorText: String?
     @State private var saveState: SaveState = .idle
     @State private var viewMode: ViewMode = .sphere
@@ -88,13 +90,13 @@ struct StitchView: View {
         let directory = sessionDirectory
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let frames = try PanoramaStitcher.loadManifest(sessionDirectory: directory)
-                guard !frames.isEmpty else {
+                let manifest = try PanoramaStitcher.loadManifest(sessionDirectory: directory)
+                guard !manifest.frames.isEmpty else {
                     DispatchQueue.main.async { errorText = "В этой съёмке нет кадров." }
                     return
                 }
                 let cgImage = PanoramaStitcher.stitch(
-                    frames: frames,
+                    frames: manifest.frames,
                     outputSize: CGSize(width: 2048, height: 1024)
                 ) { value in
                     DispatchQueue.main.async { progress = value }
@@ -104,7 +106,11 @@ struct StitchView: View {
                     return
                 }
                 let uiImage = UIImage(cgImage: cgImage)
-                DispatchQueue.main.async { resultImage = uiImage }
+                DispatchQueue.main.async {
+                    resultImage = uiImage
+                    latitude = manifest.latitude
+                    longitude = manifest.longitude
+                }
             } catch {
                 DispatchQueue.main.async { errorText = "Ошибка: \(error.localizedDescription)" }
             }
@@ -112,15 +118,27 @@ struct StitchView: View {
     }
 
     private func save(_ image: UIImage) {
+        guard let cgImage = image.cgImage else { return }
         saveState = .saving
+
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jpg")
+        do {
+            try PanoramaStitcher.writeEquirectangularJPEG(cgImage, to: tempURL, latitude: latitude, longitude: longitude)
+        } catch {
+            saveState = .failed
+            return
+        }
+
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             guard status == .authorized || status == .limited else {
                 DispatchQueue.main.async { saveState = .failed }
                 return
             }
             PHPhotoLibrary.shared().performChanges({
-                PHAssetChangeRequest.creationRequestForAsset(from: image)
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(.photo, fileURL: tempURL, options: nil)
             }) { success, _ in
+                try? FileManager.default.removeItem(at: tempURL)
                 DispatchQueue.main.async { saveState = success ? .saved : .failed }
             }
         }
