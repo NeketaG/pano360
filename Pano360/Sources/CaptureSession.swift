@@ -46,20 +46,17 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
     override init() {
         var points: [GridPoint] = []
 
-        // Основные кольца: шаг по азимуту 30° (12 точек в кольце)
-        let mainPitchesDeg: [Float] = [-60, -30, 0, 30, 60]
-        let mainYawStepsDeg = stride(from: Float(0), to: 360, by: 30).map { $0 }
-        for pitchDeg in mainPitchesDeg {
-            for yawDeg in mainYawStepsDeg {
-                points.append(GridPoint(yaw: yawDeg * .pi / 180, pitch: pitchDeg * .pi / 180))
-            }
+        // Горизонт — 11 точек, как в Google Camera Photo Sphere
+        for i in 0..<11 {
+            let yawDeg = Float(i) * 360 / 11
+            points.append(GridPoint(yaw: yawDeg * .pi / 180, pitch: 0))
         }
 
-        // Кольца ближе к полюсам: точек меньше, окружность там короче
-        let polarPitchesDeg: [Float] = [-80, 80]
-        let polarYawStepsDeg = stride(from: Float(0), to: 360, by: 90).map { $0 }
-        for pitchDeg in polarPitchesDeg {
-            for yawDeg in polarYawStepsDeg {
+        // Ряды выше и ниже горизонта — по 8 точек
+        let midPitchesDeg: [Float] = [-45, 45]
+        for pitchDeg in midPitchesDeg {
+            for i in 0..<8 {
+                let yawDeg = Float(i) * 45
                 points.append(GridPoint(yaw: yawDeg * .pi / 180, pitch: pitchDeg * .pi / 180))
             }
         }
