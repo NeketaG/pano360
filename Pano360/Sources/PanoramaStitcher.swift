@@ -47,39 +47,75 @@ enum PanoramaStitcher {
         }
     }
 
-    /// Грубая склейка по данным ориентации: без выравнивания по общим точкам
-    /// и без многополосного смешивания — это следующий шаг. Здесь только
-    /// кладём каждый кадр в сферу согласно его yaw/pitch и мягко размываем края.
+    /// Склейка по данным ориентации. Каждый пиксель канваса принадлежит ровно
+    /// одному, самому "центральному" для него кадру (меньше шансов на размытость
+    /// от усреднения многих перекрывающихся кадров), а смешиваются только узкие
+    /// полосы точно на границе между соседними кадрами. Яркость кадров выравнивается
+    /// перед смешиванием, чтобы швы не были заметны из-за разной экспозиции.
     static func stitch(frames: [FrameRecord], outputSize: CGSize, progress: ((Double) -> Void)? = nil) -> CGImage? {
         let width = Int(outputSize.width)
         let height = Int(outputSize.height)
-        var colorSum = [SIMD3<Float>](repeating: .zero, count: width * height)
-        var weightSum = [Float](repeating: 0, count: width * height)
+        let pixelCount = width * height
 
-        for (index, record) in frames.enumerated() {
-            if
+        var bestColor = [SIMD3<Float>](repeating: .zero, count: pixelCount)
+        var bestCentrality = [Float](repeating: -1, count: pixelCount)
+        var secondColor = [SIMD3<Float>](repeating: .zero, count: pixelCount)
+        var secondCentrality = [Float](repeating: -1, count: pixelCount)
+
+        struct LoadedFrame {
+            let record: FrameRecord
+            let width: Int
+            let height: Int
+            let pixels: [UInt8]
+            let luminance: Float
+        }
+
+        let loadedFrames: [LoadedFrame] = frames.compactMap { record in
+            guard
                 let source = CGImageSourceCreateWithURL(record.fileURL as CFURL, nil),
                 let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil),
                 let pixels = pixelBytes(of: cgImage)
-            {
-                rasterize(
-                    record: record, srcWidth: cgImage.width, srcHeight: cgImage.height, pixels: pixels,
-                    into: &colorSum, weightSum: &weightSum,
-                    canvasWidth: width, canvasHeight: height
-                )
-            }
-            progress?(Double(index + 1) / Double(frames.count))
+            else { return nil }
+            return LoadedFrame(
+                record: record, width: cgImage.width, height: cgImage.height,
+                pixels: pixels, luminance: averageLuminance(pixels)
+            )
+        }
+        guard !loadedFrames.isEmpty else { return nil }
+
+        let targetLuminance = loadedFrames.map(\.luminance).reduce(0, +) / Float(loadedFrames.count)
+
+        for (index, frame) in loadedFrames.enumerated() {
+            let exposureScale = frame.luminance > 1 ? min(max(targetLuminance / frame.luminance, 0.5), 2.0) : 1
+            rasterize(
+                record: frame.record, srcWidth: frame.width, srcHeight: frame.height,
+                pixels: frame.pixels, exposureScale: exposureScale,
+                bestColor: &bestColor, bestCentrality: &bestCentrality,
+                secondColor: &secondColor, secondCentrality: &secondCentrality,
+                canvasWidth: width, canvasHeight: height
+            )
+            progress?(Double(index + 1) / Double(loadedFrames.count))
         }
 
-        var outputBytes = [UInt8](repeating: 0, count: width * height * 4)
-        for i in 0..<(width * height) {
-            let w = weightSum[i]
+        let blendMargin: Float = 0.25
+        var outputBytes = [UInt8](repeating: 0, count: pixelCount * 4)
+        for i in 0..<pixelCount {
             let o = i * 4
-            if w > 0 {
-                outputBytes[o]     = UInt8(clamping: Int(colorSum[i].x / w))
-                outputBytes[o + 1] = UInt8(clamping: Int(colorSum[i].y / w))
-                outputBytes[o + 2] = UInt8(clamping: Int(colorSum[i].z / w))
+            guard bestCentrality[i] >= 0 else {
+                outputBytes[o + 3] = 255
+                continue
             }
+            var color = bestColor[i]
+            if secondCentrality[i] >= 0 {
+                let diff = bestCentrality[i] - secondCentrality[i]
+                if diff < blendMargin {
+                    let alpha = 0.5 * (1 - diff / blendMargin)
+                    color = bestColor[i] * (1 - alpha) + secondColor[i] * alpha
+                }
+            }
+            outputBytes[o]     = UInt8(clamping: Int(color.x))
+            outputBytes[o + 1] = UInt8(clamping: Int(color.y))
+            outputBytes[o + 2] = UInt8(clamping: Int(color.z))
             outputBytes[o + 3] = 255
         }
 
@@ -87,8 +123,9 @@ enum PanoramaStitcher {
     }
 
     private static func rasterize(
-        record: FrameRecord, srcWidth: Int, srcHeight: Int, pixels: [UInt8],
-        into colorSum: inout [SIMD3<Float>], weightSum: inout [Float],
+        record: FrameRecord, srcWidth: Int, srcHeight: Int, pixels: [UInt8], exposureScale: Float,
+        bestColor: inout [SIMD3<Float>], bestCentrality: inout [Float],
+        secondColor: inout [SIMD3<Float>], secondCentrality: inout [Float],
         canvasWidth: Int, canvasHeight: Int
     ) {
         let halfFOVYaw = atan(Float(srcWidth) / (2 * record.fx))
@@ -138,13 +175,22 @@ enum PanoramaStitcher {
 
                 let edgeX = 1 - abs(ndcX) / tanHalfYaw
                 let edgeY = 1 - abs(ndcY) / tanHalfPitch
-                let weight = max(0, min(edgeX, edgeY))
-                guard weight > 0 else { continue }
+                let centrality = max(0, min(edgeX, edgeY))
+                guard centrality > 0 else { continue }
 
-                let color = bilinearSample(pixels, width: srcWidth, x: srcX, y: srcY)
+                var color = bilinearSample(pixels, width: srcWidth, x: srcX, y: srcY) * exposureScale
+                color = SIMD3<Float>(min(max(color.x, 0), 255), min(max(color.y, 0), 255), min(max(color.z, 0), 255))
+
                 let index = v * canvasWidth + u
-                colorSum[index] += color * weight
-                weightSum[index] += weight
+                if centrality > bestCentrality[index] {
+                    secondCentrality[index] = bestCentrality[index]
+                    secondColor[index] = bestColor[index]
+                    bestCentrality[index] = centrality
+                    bestColor[index] = color
+                } else if centrality > secondCentrality[index] {
+                    secondCentrality[index] = centrality
+                    secondColor[index] = color
+                }
             }
         }
     }
@@ -166,6 +212,22 @@ enum PanoramaStitcher {
         ) else { return nil }
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
         return Array(UnsafeBufferPointer(start: buffer, count: bufferSize))
+    }
+
+    private static func averageLuminance(_ pixels: [UInt8]) -> Float {
+        let totalPixels = pixels.count / 4
+        guard totalPixels > 0 else { return 128 }
+        let samplingStride = max(1, totalPixels / 20000)
+        var sum: Float = 0
+        var count = 0
+        var p = 0
+        while p < totalPixels {
+            let i = p * 4
+            sum += 0.299 * Float(pixels[i]) + 0.587 * Float(pixels[i + 1]) + 0.114 * Float(pixels[i + 2])
+            count += 1
+            p += samplingStride
+        }
+        return count > 0 ? sum / Float(count) : 128
     }
 
     private static func bilinearSample(_ pixels: [UInt8], width: Int, x: Float, y: Float) -> SIMD3<Float> {
