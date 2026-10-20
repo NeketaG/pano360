@@ -7,6 +7,9 @@ struct FrameRecord {
     let fileURL: URL
     let yaw: Float
     let pitch: Float
+    let right: SIMD3<Float>
+    let up: SIMD3<Float>
+    let forward: SIMD3<Float>
     let fx: Float
     let fy: Float
     let cx: Float
@@ -28,11 +31,17 @@ enum PanoramaStitcher {
                 let fx = entry["fx"] as? Double,
                 let fy = entry["fy"] as? Double,
                 let cx = entry["cx"] as? Double,
-                let cy = entry["cy"] as? Double
+                let cy = entry["cy"] as? Double,
+                let rightX = entry["rightX"] as? Double, let rightY = entry["rightY"] as? Double, let rightZ = entry["rightZ"] as? Double,
+                let upX = entry["upX"] as? Double, let upY = entry["upY"] as? Double, let upZ = entry["upZ"] as? Double,
+                let forwardX = entry["forwardX"] as? Double, let forwardY = entry["forwardY"] as? Double, let forwardZ = entry["forwardZ"] as? Double
             else { return nil }
             return FrameRecord(
                 fileURL: sessionDirectory.appendingPathComponent(file),
                 yaw: Float(yaw), pitch: Float(pitch),
+                right: SIMD3<Float>(Float(rightX), Float(rightY), Float(rightZ)),
+                up: SIMD3<Float>(Float(upX), Float(upY), Float(upZ)),
+                forward: SIMD3<Float>(Float(forwardX), Float(forwardY), Float(forwardZ)),
                 fx: Float(fx), fy: Float(fy), cx: Float(cx), cy: Float(cy)
             )
         }
@@ -88,14 +97,9 @@ enum PanoramaStitcher {
         let yawRange = min(halfFOVYaw * 1.2, .pi)
         let pitchRange = min(halfFOVPitch * 1.2, .pi / 2)
 
-        let forward = forwardVector(yaw: record.yaw, pitch: record.pitch)
-        let worldUp = SIMD3<Float>(0, 1, 0)
-        var right = cross(forward, worldUp)
-        if length(right) < 1e-4 {
-            right = SIMD3<Float>(1, 0, 0)
-        }
-        right = normalize(right)
-        let up = cross(right, forward)
+        let forward = record.forward
+        let right = record.right
+        let up = record.up
 
         let uMin = Int((((record.yaw - yawRange) / (2 * .pi)) + 0.5) * Float(canvasWidth))
         let uMax = Int((((record.yaw + yawRange) / (2 * .pi)) + 0.5) * Float(canvasWidth))
@@ -177,10 +181,6 @@ enum PanoramaStitcher {
         let top = at(x0, y0) * (1 - fracX) + at(x1, y0) * fracX
         let bottom = at(x0, y1) * (1 - fracX) + at(x1, y1) * fracX
         return top * (1 - fracY) + bottom * fracY
-    }
-
-    private static func forwardVector(yaw: Float, pitch: Float) -> SIMD3<Float> {
-        SIMD3<Float>(cos(pitch) * sin(yaw), sin(pitch), -cos(pitch) * cos(yaw))
     }
 
     private static func makeCGImage(from bytes: [UInt8], width: Int, height: Int) -> CGImage? {

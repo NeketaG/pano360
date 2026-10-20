@@ -145,6 +145,10 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
             return
         }
         let intrinsics = frame.camera.intrinsics
+        let cameraTransform = frame.camera.transform
+        let right = SIMD3<Float>(cameraTransform.columns.0.x, cameraTransform.columns.0.y, cameraTransform.columns.0.z)
+        let up = SIMD3<Float>(cameraTransform.columns.1.x, cameraTransform.columns.1.y, cameraTransform.columns.1.z)
+        let forward = -SIMD3<Float>(cameraTransform.columns.2.x, cameraTransform.columns.2.y, cameraTransform.columns.2.z)
 
         DispatchQueue.global(qos: .userInitiated).async {
             let fileName = String(format: "frame_%03d.jpg", index)
@@ -166,7 +170,10 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
                 "fx": Double(intrinsics.columns.0.x),
                 "fy": Double(intrinsics.columns.1.y),
                 "cx": Double(intrinsics.columns.2.x),
-                "cy": Double(intrinsics.columns.2.y)
+                "cy": Double(intrinsics.columns.2.y),
+                "rightX": Double(right.x), "rightY": Double(right.y), "rightZ": Double(right.z),
+                "upX": Double(up.x), "upY": Double(up.y), "upZ": Double(up.z),
+                "forwardX": Double(forward.x), "forwardY": Double(forward.y), "forwardZ": Double(forward.z)
             ]
 
             DispatchQueue.main.async {
