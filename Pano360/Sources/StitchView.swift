@@ -95,11 +95,14 @@ struct StitchView: View {
                     DispatchQueue.main.async { errorText = "В этой съёмке нет кадров." }
                     return
                 }
+                let refinedFrames = AlignmentRefiner.refine(frames: manifest.frames) { value in
+                    DispatchQueue.main.async { progress = value * 0.5 }
+                }
                 let cgImage = PanoramaStitcher.stitch(
-                    frames: manifest.frames,
+                    frames: refinedFrames,
                     outputSize: CGSize(width: 2048, height: 1024)
                 ) { value in
-                    DispatchQueue.main.async { progress = value }
+                    DispatchQueue.main.async { progress = 0.5 + value * 0.5 }
                 }
                 guard let cgImage else {
                     DispatchQueue.main.async { errorText = "Не получилось собрать панораму." }

@@ -8,9 +8,9 @@ struct FrameRecord {
     let fileURL: URL
     let yaw: Float
     let pitch: Float
-    let right: SIMD3<Float>
-    let up: SIMD3<Float>
-    let forward: SIMD3<Float>
+    var right: SIMD3<Float>
+    var up: SIMD3<Float>
+    var forward: SIMD3<Float>
     let fx: Float
     let fy: Float
     let cx: Float
