@@ -38,7 +38,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
     private var isSaving = false
     private var frameIndex = 0
 
-    private let outputDirectory: URL
+    let outputDirectory: URL
     private var manifestEntries: [[String: Any]] = []
     private var captureHistory: [CaptureHistoryEntry] = []
     private let ciContext = CIContext()
@@ -137,8 +137,10 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
 
         // Рендерим картинку сразу здесь, в колбэке ARKit: буфер кадра переиспользуется
         // и становится недействительным сразу после возврата из didUpdate.
-        let ciImage = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.right)
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+        // Сохраняем БЕЗ поворота: fx/fy/cx/cy от ARKit заданы именно для этой,
+        // исходной ориентации сенсора — поворот для склейки не нужен и всё портит.
+        let rawCIImage = CIImage(cvPixelBuffer: frame.capturedImage)
+        guard let rawCGImage = ciContext.createCGImage(rawCIImage, from: rawCIImage.extent) else {
             isSaving = false
             return
         }
@@ -147,18 +149,20 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             let fileName = String(format: "frame_%03d.jpg", index)
             let fileURL = self.outputDirectory.appendingPathComponent(fileName)
-            let uiImage = UIImage(cgImage: cgImage)
-            if let data = uiImage.jpegData(compressionQuality: 0.9) {
+            let rawImage = UIImage(cgImage: rawCGImage)
+            if let data = rawImage.jpegData(compressionQuality: 0.9) {
                 try? data.write(to: fileURL)
             }
-            let thumbnail = self.makeThumbnail(uiImage, maxDimension: 160)
+            // Для миниатюры в интерфейсе поворот не влияет на файл — это просто метка отображения
+            let displayImage = UIImage(cgImage: rawCGImage, scale: 1, orientation: .right)
+            let thumbnail = self.makeThumbnail(displayImage, maxDimension: 160)
 
             let entry: [String: Any] = [
                 "file": fileName,
                 "yawRad": Double(point.yaw),
                 "pitchRad": Double(point.pitch),
-                "width": cgImage.width,
-                "height": cgImage.height,
+                "width": rawCGImage.width,
+                "height": rawCGImage.height,
                 "fx": Double(intrinsics.columns.0.x),
                 "fy": Double(intrinsics.columns.1.y),
                 "cx": Double(intrinsics.columns.2.x),

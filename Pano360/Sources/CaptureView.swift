@@ -4,6 +4,8 @@ import SwiftUI
 import UIKit
 
 struct CaptureView: View {
+    let onFinished: (URL) -> Void
+
     @StateObject private var capture = CaptureSession()
     @Environment(\.dismiss) private var dismiss
 
@@ -96,7 +98,7 @@ struct CaptureView: View {
             UIApplication.shared.isIdleTimerDisabled = false
         }
         .onChange(of: capture.isFinished) { _, finished in
-            if finished { dismiss() }
+            if finished { onFinished(capture.outputDirectory) }
         }
     }
 

@@ -1,7 +1,13 @@
 import SwiftUI
 
+private enum Flow: Equatable {
+    case idle
+    case capturing
+    case stitching(URL)
+}
+
 struct ContentView: View {
-    @State private var showCapture = false
+    @State private var flow: Flow = .idle
 
     var body: some View {
         VStack(spacing: 24) {
@@ -13,7 +19,7 @@ struct ContentView: View {
                 .padding(.horizontal)
 
             Button {
-                showCapture = true
+                flow = .capturing
             } label: {
                 Text("Начать съёмку")
                     .font(.headline)
@@ -24,8 +30,26 @@ struct ContentView: View {
             .padding(.horizontal, 40)
         }
         .padding()
-        .fullScreenCover(isPresented: $showCapture) {
-            CaptureView()
+        .fullScreenCover(isPresented: Binding(
+            get: { flow == .capturing },
+            set: { isPresented in if !isPresented { flow = .idle } }
+        )) {
+            CaptureView { directory in
+                flow = .stitching(directory)
+            }
+        }
+        .fullScreenCover(isPresented: Binding(
+            get: {
+                if case .stitching = flow { return true }
+                return false
+            },
+            set: { isPresented in if !isPresented { flow = .idle } }
+        )) {
+            if case .stitching(let directory) = flow {
+                StitchView(sessionDirectory: directory) {
+                    flow = .idle
+                }
+            }
         }
     }
 }
