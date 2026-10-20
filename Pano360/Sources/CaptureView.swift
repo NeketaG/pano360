@@ -1,6 +1,7 @@
 import ARKit
 import SceneKit
 import SwiftUI
+import UIKit
 
 struct CaptureView: View {
     @StateObject private var capture = CaptureSession()
@@ -86,15 +87,25 @@ struct CaptureView: View {
                     .padding(.bottom, 40)
             }
         }
-        .onAppear { capture.start() }
-        .onDisappear { capture.stop() }
+        .onAppear {
+            capture.start()
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
+        .onDisappear {
+            capture.stop()
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
         .onChange(of: capture.isFinished) { _, finished in
             if finished { dismiss() }
         }
     }
 
+    private func yawDelta(to point: GridPoint) -> Float {
+        point.ignoresYaw ? 0 : angularDifference(point.yaw, capture.currentYaw)
+    }
+
     private func screenOffset(for point: GridPoint, in size: CGSize) -> CGPoint? {
-        let dYaw = angularDifference(point.yaw, capture.currentYaw)
+        let dYaw = yawDelta(to: point)
         let dPitch = point.pitch - capture.currentPitch
         let halfFOV = guideHalfFOVDeg * .pi / 180
         guard abs(dYaw) < halfFOV, abs(dPitch) < halfFOV else { return nil }
@@ -109,7 +120,7 @@ struct CaptureView: View {
             squaredDistance(from: $0) < squaredDistance(from: $1)
         }) else { return nil }
 
-        let dYaw = angularDifference(target.yaw, capture.currentYaw)
+        let dYaw = yawDelta(to: target)
         let dPitch = target.pitch - capture.currentPitch
         let halfFOV = guideHalfFOVDeg * .pi / 180
         if abs(dYaw) < halfFOV, abs(dPitch) < halfFOV { return nil }
@@ -121,7 +132,7 @@ struct CaptureView: View {
     }
 
     private func squaredDistance(from point: GridPoint) -> Float {
-        let dYaw = angularDifference(point.yaw, capture.currentYaw)
+        let dYaw = yawDelta(to: point)
         let dPitch = point.pitch - capture.currentPitch
         return dYaw * dYaw + dPitch * dPitch
     }

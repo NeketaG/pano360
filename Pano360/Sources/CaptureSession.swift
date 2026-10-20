@@ -6,6 +6,7 @@ struct GridPoint: Identifiable {
     let id = UUID()
     let yaw: Float   // радианы, 0 = направление в момент старта
     let pitch: Float // радианы, 0 = горизонт
+    var ignoresYaw = false // зенит/надир: азимут не важен, важен только угол вверх/вниз
     var captured = false
 }
 
@@ -43,13 +44,31 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
     private let ciContext = CIContext()
 
     override init() {
-        let pitchesDeg: [Float] = [-30, 0, 30]
-        let yawStepsDeg = stride(from: Float(0), to: 360, by: 45).map { $0 }
-        gridPoints = pitchesDeg.flatMap { pitchDeg in
-            yawStepsDeg.map { yawDeg in
-                GridPoint(yaw: yawDeg * .pi / 180, pitch: pitchDeg * .pi / 180)
+        var points: [GridPoint] = []
+
+        // Основные кольца: шаг по азимуту 30° (12 точек в кольце)
+        let mainPitchesDeg: [Float] = [-60, -30, 0, 30, 60]
+        let mainYawStepsDeg = stride(from: Float(0), to: 360, by: 30).map { $0 }
+        for pitchDeg in mainPitchesDeg {
+            for yawDeg in mainYawStepsDeg {
+                points.append(GridPoint(yaw: yawDeg * .pi / 180, pitch: pitchDeg * .pi / 180))
             }
         }
+
+        // Кольца ближе к полюсам: точек меньше, окружность там короче
+        let polarPitchesDeg: [Float] = [-80, 80]
+        let polarYawStepsDeg = stride(from: Float(0), to: 360, by: 90).map { $0 }
+        for pitchDeg in polarPitchesDeg {
+            for yawDeg in polarYawStepsDeg {
+                points.append(GridPoint(yaw: yawDeg * .pi / 180, pitch: pitchDeg * .pi / 180))
+            }
+        }
+
+        // Зенит и надир — прямо вверх и прямо вниз, азимут там не определён
+        points.append(GridPoint(yaw: 0, pitch: 90 * .pi / 180, ignoresYaw: true))
+        points.append(GridPoint(yaw: 0, pitch: -90 * .pi / 180, ignoresYaw: true))
+
+        gridPoints = points
 
         let sessionName = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
@@ -107,9 +126,10 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
     private func nearestUncapturedPoint(toYaw yaw: Float, pitch: Float) -> GridPoint? {
         let toleranceRad = captureToleranceDeg * .pi / 180
         return gridPoints.first { point in
-            !point.captured &&
-            abs(angularDifference(yaw, point.yaw)) < toleranceRad &&
-            abs(pitch - point.pitch) < toleranceRad
+            guard !point.captured else { return false }
+            let pitchTolerance = point.ignoresYaw ? toleranceRad * 1.5 : toleranceRad
+            guard abs(pitch - point.pitch) < pitchTolerance else { return false }
+            return point.ignoresYaw || abs(angularDifference(yaw, point.yaw)) < toleranceRad
         }
     }
 
