@@ -17,11 +17,13 @@ struct SphereViewer: UIViewRepresentable {
         sphere.segmentCount = 96
         sphere.firstMaterial?.diffuse.contents = image
         sphere.firstMaterial?.diffuse.wrapS = .repeat
-        sphere.firstMaterial?.isDoubleSided = false
+        // isDoubleSided — чтобы поверхность было видно и изнутри сферы, не только снаружи.
+        // constant — чтобы текстура показывалась как есть, без имитации освещения
+        // (иначе без источников света на сцене материал рендерится чёрным).
+        sphere.firstMaterial?.isDoubleSided = true
+        sphere.firstMaterial?.lightingModel = .constant
 
         let sphereNode = SCNNode(geometry: sphere)
-        // Разворачиваем геометрию наизнанку, чтобы текстура была видна из центра сферы, а не только снаружи
-        sphereNode.scale = SCNVector3(-1, 1, 1)
         scene.rootNode.addChildNode(sphereNode)
 
         let cameraNode = SCNNode()
