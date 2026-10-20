@@ -13,6 +13,12 @@ func angularDifference(_ a: Float, _ b: Float) -> Float {
     atan2(sin(a - b), cos(a - b))
 }
 
+private struct CaptureHistoryEntry {
+    let pointID: GridPoint.ID
+    let fileName: String
+    let thumbnail: UIImage
+}
+
 final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
     let session = ARSession()
 
@@ -22,6 +28,8 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
     @Published var alignedPointID: GridPoint.ID?
     @Published var isFinished = false
     @Published var statusText = "Наведи камеру и поворачивайся по кругу"
+    @Published var lastCapturedImage: UIImage?
+    @Published var canUndo = false
 
     private let captureToleranceDeg: Float = 6
     private let stabilizeSeconds: TimeInterval = 0.4
@@ -31,6 +39,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
 
     private let outputDirectory: URL
     private var manifestEntries: [[String: Any]] = []
+    private var captureHistory: [CaptureHistoryEntry] = []
     private let ciContext = CIContext()
 
     override init() {
@@ -125,6 +134,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
             if let data = uiImage.jpegData(compressionQuality: 0.9) {
                 try? data.write(to: fileURL)
             }
+            let thumbnail = self.makeThumbnail(uiImage, maxDimension: 160)
 
             let entry: [String: Any] = [
                 "file": fileName,
@@ -143,6 +153,9 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
                 if let idx = self.gridPoints.firstIndex(where: { $0.id == point.id }) {
                     self.gridPoints[idx].captured = true
                 }
+                self.captureHistory.append(CaptureHistoryEntry(pointID: point.id, fileName: fileName, thumbnail: thumbnail))
+                self.lastCapturedImage = thumbnail
+                self.canUndo = true
                 self.alignedPointID = nil
                 self.isSaving = false
                 let done = self.gridPoints.filter { $0.captured }.count
@@ -152,6 +165,29 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
                     self.finish()
                 }
             }
+        }
+    }
+
+    func undoLastCapture() {
+        guard !isSaving, let last = captureHistory.popLast() else { return }
+        if let idx = gridPoints.firstIndex(where: { $0.id == last.pointID }) {
+            gridPoints[idx].captured = false
+        }
+        manifestEntries.removeAll { ($0["file"] as? String) == last.fileName }
+        try? FileManager.default.removeItem(at: outputDirectory.appendingPathComponent(last.fileName))
+        lastCapturedImage = captureHistory.last?.thumbnail
+        canUndo = !captureHistory.isEmpty
+        let done = gridPoints.filter { $0.captured }.count
+        statusText = "Кадр отменён. Снято \(done) из \(gridPoints.count)"
+    }
+
+    private func makeThumbnail(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
+        let size = image.size
+        let scale = maxDimension / max(size.width, size.height)
+        let targetSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
         }
     }
 

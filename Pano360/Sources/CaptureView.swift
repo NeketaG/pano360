@@ -48,7 +48,30 @@ struct CaptureView: View {
                             .padding(12)
                             .background(.black.opacity(0.5), in: Circle())
                     }
+
                     Spacer()
+
+                    if capture.canUndo {
+                        VStack(spacing: 6) {
+                            if let thumbnail = capture.lastCapturedImage {
+                                Image(uiImage: thumbnail)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 64, height: 64)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white, lineWidth: 1))
+                            }
+                            Button {
+                                capture.undoLastCapture()
+                            } label: {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.title3)
+                                    .foregroundStyle(.white)
+                                    .padding(10)
+                                    .background(.black.opacity(0.5), in: Circle())
+                            }
+                        }
+                    }
                 }
                 .padding()
 
