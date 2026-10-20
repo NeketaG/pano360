@@ -86,6 +86,14 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     func start() {
         session.delegate = self
         let config = AROrientationTrackingConfiguration()
+        // По умолчанию ARKit может выбрать формат 16:9 — он даёт слишком вытянутые
+        // кадры для панорамы, подбираем ближайший к привычному 4:3.
+        if let format = AROrientationTrackingConfiguration.supportedVideoFormats.min(by: {
+            abs($0.imageResolution.width / $0.imageResolution.height - 4.0 / 3.0) <
+            abs($1.imageResolution.width / $1.imageResolution.height - 4.0 / 3.0)
+        }) {
+            config.videoFormat = format
+        }
         session.run(config)
 
         locationManager.delegate = self

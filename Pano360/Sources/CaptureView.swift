@@ -1,5 +1,6 @@
 import ARKit
 import SceneKit
+import simd
 import SwiftUI
 import UIKit
 
@@ -11,31 +12,22 @@ struct CaptureView: View {
     @State private var showResetConfirm = false
 
     private let guideHalfFOVDeg: Float = 30
-    private let panelAngularWidthDeg: Float = 28
-    private let panelAngularHeightDeg: Float = 38
 
     var body: some View {
         ZStack {
-            ARViewRepresentable(session: capture.session)
-                .ignoresSafeArea()
+            ARViewRepresentable(
+                session: capture.session,
+                gridPoints: capture.gridPoints,
+                capturedThumbnails: capture.capturedThumbnails
+            )
+            .ignoresSafeArea()
 
             GeometryReader { geo in
                 ZStack {
-                    ForEach(capture.gridPoints) { point in
+                    ForEach(capture.gridPoints.filter { !$0.captured }) { point in
                         if let offset = screenOffset(for: point, in: geo.size) {
-                            if point.captured, let thumbnail = capture.capturedThumbnails[point.id] {
-                                let panel = panelSize(in: geo.size)
-                                Image(uiImage: thumbnail)
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(width: panel.width, height: panel.height)
-                                    .clipped()
-                                    .overlay(Rectangle().stroke(Color.green, lineWidth: 2))
-                                    .position(x: geo.size.width / 2 + offset.x, y: geo.size.height / 2 + offset.y)
-                            } else {
-                                MarkerView(isAligned: capture.alignedPointID == point.id)
-                                    .position(x: geo.size.width / 2 + offset.x, y: geo.size.height / 2 + offset.y)
-                            }
+                            MarkerView(isAligned: capture.alignedPointID == point.id)
+                                .position(x: geo.size.width / 2 + offset.x, y: geo.size.height / 2 + offset.y)
                         }
                     }
 
@@ -149,15 +141,6 @@ struct CaptureView: View {
         return CGPoint(x: x, y: y)
     }
 
-    private func panelSize(in size: CGSize) -> CGSize {
-        let halfFOV = guideHalfFOVDeg * .pi / 180
-        let widthRad = panelAngularWidthDeg * .pi / 180
-        let heightRad = panelAngularHeightDeg * .pi / 180
-        let w = CGFloat(widthRad / halfFOV) * (size.width / 2)
-        let h = CGFloat(heightRad / halfFOV) * (size.height / 2)
-        return CGSize(width: w, height: h)
-    }
-
     private func nearestOffscreenDirection(in size: CGSize) -> (point: CGPoint, angle: Float)? {
         let remaining = capture.gridPoints.filter { !$0.captured }
         guard let target = remaining.min(by: {
@@ -193,15 +176,86 @@ private struct MarkerView: View {
     }
 }
 
+/// Показывает живую картинку камеры (через ARSCNView) и "приклеивает" миниатюры
+/// снятых кадров прямо в 3D-пространство сессии ARKit — в тех направлениях, где
+/// они были сняты. Поэтому при повороте телефона они естественно поворачиваются
+/// и меняют перспективу вместе с камерой, как настоящие объекты в пространстве,
+/// а не плоская накладка поверх экрана.
 private struct ARViewRepresentable: UIViewRepresentable {
     let session: ARSession
+    let gridPoints: [GridPoint]
+    let capturedThumbnails: [GridPoint.ID: UIImage]
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> ARSCNView {
         let view = ARSCNView()
         view.session = session
         view.automaticallyUpdatesLighting = true
+        context.coordinator.scene = view.scene
         return view
     }
 
-    func updateUIView(_ uiView: ARSCNView, context: Context) {}
+    func updateUIView(_ uiView: ARSCNView, context: Context) {
+        context.coordinator.sync(gridPoints: gridPoints, thumbnails: capturedThumbnails)
+    }
+
+    final class Coordinator {
+        weak var scene: SCNScene?
+        private var nodes: [GridPoint.ID: SCNNode] = [:]
+
+        func sync(gridPoints: [GridPoint], thumbnails: [GridPoint.ID: UIImage]) {
+            guard let scene else { return }
+
+            for point in gridPoints {
+                guard nodes[point.id] == nil, let thumbnail = thumbnails[point.id] else { continue }
+                let node = Self.makePlaneNode(point: point, image: thumbnail)
+                scene.rootNode.addChildNode(node)
+                nodes[point.id] = node
+            }
+
+            for (id, node) in nodes where thumbnails[id] == nil {
+                node.removeFromParentNode()
+                nodes[id] = nil
+            }
+        }
+
+        private static func makePlaneNode(point: GridPoint, image: UIImage) -> SCNNode {
+            let distance: Float = 2
+            let angularWidth: Float = 28 * .pi / 180
+            let angularHeight: Float = 38 * .pi / 180
+            let width = CGFloat(2 * distance * tan(angularWidth / 2))
+            let height = CGFloat(2 * distance * tan(angularHeight / 2))
+
+            let plane = SCNPlane(width: width, height: height)
+            plane.firstMaterial?.diffuse.contents = image
+            plane.firstMaterial?.isDoubleSided = true
+            plane.firstMaterial?.lightingModel = .constant
+
+            let direction = SIMD3<Float>(
+                cos(point.pitch) * sin(point.yaw),
+                sin(point.pitch),
+                -cos(point.pitch) * cos(point.yaw)
+            )
+            let position = direction * distance
+
+            // Нормаль плоскости должна смотреть на пользователя (к началу координат),
+            // то есть в сторону, противоположную направлению съёмки.
+            let forward = -direction
+            let worldUp = SIMD3<Float>(0, 1, 0)
+            var right = cross(forward, worldUp)
+            if length(right) < 1e-4 { right = SIMD3<Float>(1, 0, 0) }
+            right = normalize(right)
+            let up = cross(right, forward)
+
+            let node = SCNNode(geometry: plane)
+            node.simdTransform = simd_float4x4(columns: (
+                SIMD4<Float>(right, 0),
+                SIMD4<Float>(up, 0),
+                SIMD4<Float>(forward, 0),
+                SIMD4<Float>(position, 1)
+            ))
+            return node
+        }
+    }
 }
