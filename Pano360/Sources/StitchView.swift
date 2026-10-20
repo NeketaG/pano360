@@ -136,7 +136,7 @@ struct StitchView: View {
             }
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetCreationRequest.forAsset()
-                request.addResource(.photo, fileURL: tempURL, options: nil)
+                request.addResource(with: .photo, fileURL: tempURL, options: nil)
             }) { success, _ in
                 try? FileManager.default.removeItem(at: tempURL)
                 DispatchQueue.main.async { saveState = success ? .saved : .failed }

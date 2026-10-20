@@ -97,9 +97,7 @@ enum PanoramaStitcher {
         setGPano("CroppedAreaLeftPixels", "0")
         setGPano("CroppedAreaTopPixels", "0")
 
-        guard CGImageDestinationAddImageAndMetadata(destination, cgImage, metadata, properties as CFDictionary) else {
-            throw NSError(domain: "PanoramaStitcher", code: 3, userInfo: [NSLocalizedDescriptionKey: "Не удалось записать метаданные"])
-        }
+        CGImageDestinationAddImageAndMetadata(destination, cgImage, metadata, properties as CFDictionary)
         guard CGImageDestinationFinalize(destination) else {
             throw NSError(domain: "PanoramaStitcher", code: 4, userInfo: [NSLocalizedDescriptionKey: "Не удалось сохранить файл"])
         }
