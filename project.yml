@@ -15,6 +15,7 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: "Камера нужна для съёмки панорамы 360°."
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.domenic.pano360
@@ -22,3 +23,4 @@ targets:
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGN_IDENTITY: ""
+        SWIFT_VERSION: "5"
