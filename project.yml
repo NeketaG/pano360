@@ -1,0 +1,24 @@
+name: Pano360
+options:
+  bundleIdPrefix: com.domenic.pano360
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  Pano360:
+    type: application
+    platform: iOS
+    sources:
+      - path: Pano360/Sources
+    info:
+      path: Pano360/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.domenic.pano360
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGN_IDENTITY: ""
