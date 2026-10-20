@@ -8,8 +8,11 @@ struct CaptureView: View {
 
     @StateObject private var capture = CaptureSession()
     @Environment(\.dismiss) private var dismiss
+    @State private var showResetConfirm = false
 
     private let guideHalfFOVDeg: Float = 30
+    private let panelAngularWidthDeg: Float = 28
+    private let panelAngularHeightDeg: Float = 38
 
     var body: some View {
         ZStack {
@@ -20,12 +23,19 @@ struct CaptureView: View {
                 ZStack {
                     ForEach(capture.gridPoints) { point in
                         if let offset = screenOffset(for: point, in: geo.size) {
-                            MarkerView(
-                                captured: point.captured,
-                                isAligned: capture.alignedPointID == point.id,
-                                thumbnail: capture.capturedThumbnails[point.id]
-                            )
-                            .position(x: geo.size.width / 2 + offset.x, y: geo.size.height / 2 + offset.y)
+                            if point.captured, let thumbnail = capture.capturedThumbnails[point.id] {
+                                let panel = panelSize(in: geo.size)
+                                Image(uiImage: thumbnail)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: panel.width, height: panel.height)
+                                    .clipped()
+                                    .overlay(Rectangle().stroke(Color.green, lineWidth: 2))
+                                    .position(x: geo.size.width / 2 + offset.x, y: geo.size.height / 2 + offset.y)
+                            } else {
+                                MarkerView(isAligned: capture.alignedPointID == point.id)
+                                    .position(x: geo.size.width / 2 + offset.x, y: geo.size.height / 2 + offset.y)
+                            }
                         }
                     }
 
@@ -45,16 +55,42 @@ struct CaptureView: View {
             }
 
             VStack {
-                HStack {
+                Text(capture.statusText)
+                    .font(.headline)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.6), in: Capsule())
+                    .foregroundStyle(.white)
+                    .padding(.top, 12)
+
+                Spacer()
+
+                HStack(spacing: 20) {
                     Button {
-                        dismiss()
+                        capture.undoLastCapture()
                     } label: {
-                        Image(systemName: "xmark")
+                        Image(systemName: "arrow.uturn.backward")
                             .font(.title2)
                             .foregroundStyle(.white)
-                            .padding(12)
+                            .padding(14)
                             .background(.black.opacity(0.5), in: Circle())
                     }
+                    .opacity(capture.canUndo ? 1 : 0.3)
+                    .disabled(!capture.canUndo)
+
+                    Button {
+                        showResetConfirm = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.title2)
+                            .foregroundStyle(.white)
+                            .padding(14)
+                            .background(.black.opacity(0.5), in: Circle())
+                    }
+                    .opacity(capture.canUndo ? 1 : 0.3)
+                    .disabled(!capture.canUndo)
+
+                    Spacer()
 
                     Button {
                         capture.toggleTorch()
@@ -62,46 +98,22 @@ struct CaptureView: View {
                         Image(systemName: capture.isTorchOn ? "bolt.fill" : "bolt.slash.fill")
                             .font(.title2)
                             .foregroundStyle(capture.isTorchOn ? .yellow : .white)
-                            .padding(12)
+                            .padding(14)
                             .background(.black.opacity(0.5), in: Circle())
                     }
-                    .padding(.leading, 8)
 
-                    Spacer()
-
-                    if capture.canUndo {
-                        VStack(spacing: 6) {
-                            if let thumbnail = capture.lastCapturedImage {
-                                Image(uiImage: thumbnail)
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(width: 64, height: 64)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white, lineWidth: 1))
-                            }
-                            Button {
-                                capture.undoLastCapture()
-                            } label: {
-                                Image(systemName: "arrow.uturn.backward")
-                                    .font(.title3)
-                                    .foregroundStyle(.white)
-                                    .padding(10)
-                                    .background(.black.opacity(0.5), in: Circle())
-                            }
-                        }
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.title2)
+                            .foregroundStyle(.white)
+                            .padding(14)
+                            .background(.black.opacity(0.5), in: Circle())
                     }
                 }
-                .padding()
-
-                Spacer()
-
-                Text(capture.statusText)
-                    .font(.headline)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(.black.opacity(0.6), in: Capsule())
-                    .foregroundStyle(.white)
-                    .padding(.bottom, 40)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 40)
             }
         }
         .onAppear {
@@ -114,6 +126,12 @@ struct CaptureView: View {
         }
         .onChange(of: capture.isFinished) { _, finished in
             if finished { onFinished(capture.outputDirectory) }
+        }
+        .alert("Начать съёмку заново?", isPresented: $showResetConfirm) {
+            Button("Сбросить", role: .destructive) { capture.resetAll() }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Все снятые кадры в этой съёмке будут удалены.")
         }
     }
 
@@ -129,6 +147,15 @@ struct CaptureView: View {
         let x = CGFloat(dYaw / halfFOV) * (size.width / 2)
         let y = CGFloat(-dPitch / halfFOV) * (size.height / 2)
         return CGPoint(x: x, y: y)
+    }
+
+    private func panelSize(in size: CGSize) -> CGSize {
+        let halfFOV = guideHalfFOVDeg * .pi / 180
+        let widthRad = panelAngularWidthDeg * .pi / 180
+        let heightRad = panelAngularHeightDeg * .pi / 180
+        let w = CGFloat(widthRad / halfFOV) * (size.width / 2)
+        let h = CGFloat(heightRad / halfFOV) * (size.height / 2)
+        return CGSize(width: w, height: h)
     }
 
     private func nearestOffscreenDirection(in size: CGSize) -> (point: CGPoint, angle: Float)? {
@@ -156,26 +183,13 @@ struct CaptureView: View {
 }
 
 private struct MarkerView: View {
-    let captured: Bool
     let isAligned: Bool
-    let thumbnail: UIImage?
 
     var body: some View {
         let size: CGFloat = isAligned ? 46 : 36
-        Group {
-            if captured, let thumbnail {
-                Image(uiImage: thumbnail)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: size, height: size)
-                    .clipShape(Circle())
-                    .overlay(Circle().stroke(Color.green, lineWidth: 2))
-            } else {
-                Circle()
-                    .strokeBorder(isAligned ? Color.yellow : Color.white, lineWidth: isAligned ? 4 : 2)
-                    .frame(width: size, height: size)
-            }
-        }
+        Circle()
+            .strokeBorder(isAligned ? Color.yellow : Color.white, lineWidth: isAligned ? 4 : 2)
+            .frame(width: size, height: size)
     }
 }
 

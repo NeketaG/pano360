@@ -251,6 +251,26 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         statusText = "Кадр отменён. Снято \(done) из \(gridPoints.count)"
     }
 
+    /// Сбрасывает всю съёмку: удаляет уже снятые кадры и начинает сетку точек заново.
+    func resetAll() {
+        guard !isSaving else { return }
+        for entry in captureHistory {
+            try? FileManager.default.removeItem(at: outputDirectory.appendingPathComponent(entry.fileName))
+        }
+        captureHistory.removeAll()
+        capturedThumbnails.removeAll()
+        manifestEntries.removeAll()
+        frameIndex = 0
+        for idx in gridPoints.indices {
+            gridPoints[idx].captured = false
+        }
+        lastCapturedImage = nil
+        canUndo = false
+        alignedSince = nil
+        alignedPointID = nil
+        statusText = "Наведи камеру и поворачивайся по кругу"
+    }
+
     private func makeThumbnail(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
         let size = image.size
         let scale = maxDimension / max(size.width, size.height)

@@ -7,11 +7,11 @@ struct StitchView: View {
 
     @State private var progress: Double = 0
     @State private var resultImage: UIImage?
-    @State private var latitude: Double?
-    @State private var longitude: Double?
+    @State private var cachedFileURL: URL?
     @State private var errorText: String?
     @State private var saveState: SaveState = .idle
     @State private var viewMode: ViewMode = .sphere
+    @State private var isRecomputing = false
 
     private enum SaveState {
         case idle, saving, saved, failed
@@ -22,9 +22,23 @@ struct StitchView: View {
         case flat = "Плоско"
     }
 
+    private var cacheURL: URL {
+        sessionDirectory.appendingPathComponent("panorama.jpg")
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             HStack {
+                if resultImage != nil {
+                    Button {
+                        runStitch(forceRecompute: true)
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.title3)
+                    }
+                    .disabled(isRecomputing)
+                    .padding()
+                }
                 Spacer()
                 Button("Готово") { onClose() }
                     .padding()
@@ -54,7 +68,7 @@ struct StitchView: View {
                 }
 
                 Button {
-                    save(resultImage)
+                    save()
                 } label: {
                     Text(saveButtonTitle)
                 }
@@ -74,7 +88,7 @@ struct StitchView: View {
 
             Spacer()
         }
-        .onAppear { runStitch() }
+        .onAppear { runStitch(forceRecompute: false) }
     }
 
     private var saveButtonTitle: String {
@@ -86,13 +100,26 @@ struct StitchView: View {
         }
     }
 
-    private func runStitch() {
+    private func runStitch(forceRecompute: Bool) {
         let directory = sessionDirectory
+        let cache = cacheURL
+
+        if !forceRecompute, FileManager.default.fileExists(atPath: cache.path), let cached = UIImage(contentsOfFile: cache.path) {
+            resultImage = cached
+            cachedFileURL = cache
+            return
+        }
+
+        isRecomputing = true
+        errorText = nil
+        resultImage = nil
+        progress = 0
+
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let manifest = try PanoramaStitcher.loadManifest(sessionDirectory: directory)
                 guard !manifest.frames.isEmpty else {
-                    DispatchQueue.main.async { errorText = "В этой съёмке нет кадров." }
+                    DispatchQueue.main.async { errorText = "В этой съёмке нет кадров."; isRecomputing = false }
                     return
                 }
                 let refinedFrames = AlignmentRefiner.refine(frames: manifest.frames) { value in
@@ -105,32 +132,25 @@ struct StitchView: View {
                     DispatchQueue.main.async { progress = 0.5 + value * 0.5 }
                 }
                 guard let cgImage else {
-                    DispatchQueue.main.async { errorText = "Не получилось собрать панораму." }
+                    DispatchQueue.main.async { errorText = "Не получилось собрать панораму."; isRecomputing = false }
                     return
                 }
+                try? PanoramaStitcher.writeEquirectangularJPEG(cgImage, to: cache, latitude: manifest.latitude, longitude: manifest.longitude)
                 let uiImage = UIImage(cgImage: cgImage)
                 DispatchQueue.main.async {
                     resultImage = uiImage
-                    latitude = manifest.latitude
-                    longitude = manifest.longitude
+                    cachedFileURL = cache
+                    isRecomputing = false
                 }
             } catch {
-                DispatchQueue.main.async { errorText = "Ошибка: \(error.localizedDescription)" }
+                DispatchQueue.main.async { errorText = "Ошибка: \(error.localizedDescription)"; isRecomputing = false }
             }
         }
     }
 
-    private func save(_ image: UIImage) {
-        guard let cgImage = image.cgImage else { return }
+    private func save() {
+        guard let cachedFileURL else { return }
         saveState = .saving
-
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jpg")
-        do {
-            try PanoramaStitcher.writeEquirectangularJPEG(cgImage, to: tempURL, latitude: latitude, longitude: longitude)
-        } catch {
-            saveState = .failed
-            return
-        }
 
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             guard status == .authorized || status == .limited else {
@@ -139,9 +159,8 @@ struct StitchView: View {
             }
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetCreationRequest.forAsset()
-                request.addResource(with: .photo, fileURL: tempURL, options: nil)
+                request.addResource(with: .photo, fileURL: cachedFileURL, options: nil)
             }) { success, _ in
-                try? FileManager.default.removeItem(at: tempURL)
                 DispatchQueue.main.async { saveState = success ? .saved : .failed }
             }
         }
