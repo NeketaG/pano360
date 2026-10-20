@@ -9,9 +9,15 @@ struct StitchView: View {
     @State private var resultImage: UIImage?
     @State private var errorText: String?
     @State private var saveState: SaveState = .idle
+    @State private var viewMode: ViewMode = .sphere
 
     private enum SaveState {
         case idle, saving, saved, failed
+    }
+
+    private enum ViewMode: String, CaseIterable {
+        case sphere = "Сфера"
+        case flat = "Плоско"
     }
 
     var body: some View {
@@ -25,11 +31,24 @@ struct StitchView: View {
             Spacer()
 
             if let resultImage {
-                ScrollView([.horizontal, .vertical]) {
-                    Image(uiImage: resultImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 1000)
+                Picker("Режим просмотра", selection: $viewMode) {
+                    ForEach(ViewMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 40)
+
+                if viewMode == .sphere {
+                    SphereViewer(image: resultImage)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView([.horizontal, .vertical]) {
+                        Image(uiImage: resultImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 1000)
+                    }
                 }
 
                 Button {

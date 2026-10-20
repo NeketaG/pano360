@@ -98,13 +98,11 @@ enum PanoramaStitcher {
         }
 
         let blendMargin: Float = 0.25
-        var outputBytes = [UInt8](repeating: 0, count: pixelCount * 4)
+        var outputColor = [SIMD3<Float>](repeating: .zero, count: pixelCount)
+        var covered = [Bool](repeating: false, count: pixelCount)
         for i in 0..<pixelCount {
-            let o = i * 4
-            guard bestCentrality[i] >= 0 else {
-                outputBytes[o + 3] = 255
-                continue
-            }
+            guard bestCentrality[i] >= 0 else { continue }
+            covered[i] = true
             var color = bestColor[i]
             if secondCentrality[i] >= 0 {
                 let diff = bestCentrality[i] - secondCentrality[i]
@@ -113,9 +111,21 @@ enum PanoramaStitcher {
                     color = bestColor[i] * (1 - alpha) + secondColor[i] * alpha
                 }
             }
-            outputBytes[o]     = UInt8(clamping: Int(color.x))
-            outputBytes[o + 1] = UInt8(clamping: Int(color.y))
-            outputBytes[o + 2] = UInt8(clamping: Int(color.z))
+            outputColor[i] = color
+        }
+
+        // Между соседними кадрами иногда остаются непокрытые дыры (особенно по
+        // диагонали между рядами) — затягиваем их цветом ближайшего готового пикселя.
+        fillGaps(color: &outputColor, covered: &covered, width: width, height: height)
+
+        var outputBytes = [UInt8](repeating: 0, count: pixelCount * 4)
+        for i in 0..<pixelCount {
+            let o = i * 4
+            if covered[i] {
+                outputBytes[o]     = UInt8(clamping: Int(outputColor[i].x))
+                outputBytes[o + 1] = UInt8(clamping: Int(outputColor[i].y))
+                outputBytes[o + 2] = UInt8(clamping: Int(outputColor[i].z))
+            }
             outputBytes[o + 3] = 255
         }
 
@@ -192,6 +202,34 @@ enum PanoramaStitcher {
                     secondColor[index] = color
                 }
             }
+        }
+    }
+
+    private static func fillGaps(color: inout [SIMD3<Float>], covered: inout [Bool], width: Int, height: Int) {
+        for _ in 0..<12 {
+            var changed = false
+            for y in 0..<height {
+                let rowStart = y * width
+                for x in 0..<width {
+                    let idx = rowStart + x
+                    guard !covered[idx] else { continue }
+
+                    let leftIdx = rowStart + ((x - 1 + width) % width)
+                    let rightIdx = rowStart + ((x + 1) % width)
+                    var donor = -1
+                    if covered[leftIdx] { donor = leftIdx }
+                    else if covered[rightIdx] { donor = rightIdx }
+                    else if y > 0, covered[idx - width] { donor = idx - width }
+                    else if y < height - 1, covered[idx + width] { donor = idx + width }
+
+                    if donor >= 0 {
+                        color[idx] = color[donor]
+                        covered[idx] = true
+                        changed = true
+                    }
+                }
+            }
+            if !changed { break }
         }
     }
 
