@@ -3,8 +3,8 @@ import SwiftUI
 private struct GalleryEntry: Identifiable {
     let id: URL
     let date: Date
-    let thumbnailURL: URL?
-    var hasPanorama: Bool { thumbnailURL != nil }
+    let hasPanorama: Bool
+    let thumbnail: UIImage?
 }
 
 struct GalleryView: View {
@@ -51,8 +51,8 @@ struct GalleryView: View {
     private func row(for entry: GalleryEntry) -> some View {
         HStack(spacing: 12) {
             Group {
-                if let thumbURL = entry.thumbnailURL, let image = UIImage(contentsOfFile: thumbURL.path) {
-                    Image(uiImage: image)
+                if let thumbnail = entry.thumbnail {
+                    Image(uiImage: thumbnail)
                         .resizable()
                         .scaledToFill()
                 } else {
@@ -93,7 +93,11 @@ struct GalleryView: View {
             let date = (try? dir.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
             let panoURL = dir.appendingPathComponent("panorama.jpg")
             let hasPano = FileManager.default.fileExists(atPath: panoURL.path)
-            return GalleryEntry(id: dir, date: date, thumbnailURL: hasPano ? panoURL : nil)
+            // Панорама 8192×4096 — для превью декодируем только уменьшенную копию
+            let thumbnail = hasPano
+                ? PanoramaStitcher.downsampledImage(at: panoURL, maxPixelSize: 256).map { UIImage(cgImage: $0.image) }
+                : nil
+            return GalleryEntry(id: dir, date: date, hasPanorama: hasPano, thumbnail: thumbnail)
         }.sorted { $0.date > $1.date }
     }
 

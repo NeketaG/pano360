@@ -16,10 +16,18 @@ func angularDifference(_ a: Float, _ b: Float) -> Float {
     atan2(sin(a - b), cos(a - b))
 }
 
+/// Снятый кадр для показа "на сфере" во время съёмки: уменьшенная копия в исходной
+/// ориентации сенсора + точная поза камеры в момент снимка и её угол обзора.
+struct CapturedPanel {
+    let image: UIImage
+    let cameraTransform: simd_float4x4
+    let halfTanX: Float
+    let halfTanY: Float
+}
+
 private struct CaptureHistoryEntry {
     let pointID: GridPoint.ID
     let fileName: String
-    let thumbnail: UIImage
 }
 
 final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLocationManagerDelegate {
@@ -33,9 +41,8 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     @Published var alignedPointID: GridPoint.ID?
     @Published var isFinished = false
     @Published var statusText = "Наведи камеру и поворачивайся по кругу"
-    @Published var lastCapturedImage: UIImage?
     @Published var canUndo = false
-    @Published var capturedThumbnails: [GridPoint.ID: UIImage] = [:]
+    @Published var capturedPanels: [GridPoint.ID: CapturedPanel] = [:]
     @Published var isTorchOn = false
 
     private let captureToleranceDeg: Float = 6
@@ -43,6 +50,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     private var alignedSince: Date?
     private var isSaving = false
     private var frameIndex = 0
+    private var useHighResolution = true
 
     let outputDirectory: URL
     private var manifestEntries: [[String: Any]] = []
@@ -58,11 +66,10 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             points.append(GridPoint(yaw: yawDeg * .pi / 180, pitch: 0))
         }
 
-        // Ряды выше и ниже горизонта — по 8 точек
-        let midPitchesDeg: [Float] = [-45, 45]
-        for pitchDeg in midPitchesDeg {
-            for i in 0..<8 {
-                let yawDeg = Float(i) * 45
+        // Ряды выше и ниже горизонта — по 9 точек
+        for pitchDeg: Float in [-45, 45] {
+            for i in 0..<9 {
+                let yawDeg = Float(i) * 360 / 9
                 points.append(GridPoint(yaw: yawDeg * .pi / 180, pitch: pitchDeg * .pi / 180))
             }
         }
@@ -85,13 +92,8 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
 
     func start() {
         session.delegate = self
-        let config = AROrientationTrackingConfiguration()
-        // По умолчанию ARKit может выбрать формат 16:9 — он даёт слишком вытянутые
-        // кадры для панорамы, подбираем ближайший к привычному 4:3.
-        if let format = AROrientationTrackingConfiguration.supportedVideoFormats.min(by: {
-            abs($0.imageResolution.width / $0.imageResolution.height - 4.0 / 3.0) <
-            abs($1.imageResolution.width / $1.imageResolution.height - 4.0 / 3.0)
-        }) {
+        let config = ARWorldTrackingConfiguration()
+        if let format = Self.preferredVideoFormat() {
             config.videoFormat = format
         }
         session.run(config)
@@ -100,6 +102,23 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
         locationManager.requestWhenInUseAuthorization()
         locationManager.startUpdatingLocation()
+    }
+
+    /// Формат 4:3 (16:9 даёт слишком вытянутые кадры), по возможности тот,
+    /// что поддерживает снимки в полном разрешении сенсора.
+    private static func preferredVideoFormat() -> ARConfiguration.VideoFormat? {
+        let formats = ARWorldTrackingConfiguration.supportedVideoFormats
+        func aspectError(_ format: ARConfiguration.VideoFormat) -> CGFloat {
+            abs(format.imageResolution.width / format.imageResolution.height - 4.0 / 3.0)
+        }
+        let fourByThree = formats.filter { aspectError($0) < 0.05 }
+        if let format = fourByThree.first(where: { $0.isRecommendedForHighResolutionFrameCapturing }) {
+            return format
+        }
+        if let format = fourByThree.max(by: { $0.imageResolution.width < $1.imageResolution.width }) {
+            return format
+        }
+        return formats.min(by: { aspectError($0) < aspectError($1) })
     }
 
     func stop() {
@@ -152,7 +171,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             if let since = alignedSince {
                 if Date().timeIntervalSince(since) >= stabilizeSeconds {
                     alignedSince = nil
-                    capture(frame: frame, for: target)
+                    beginCapture(currentFrame: frame, for: target)
                 }
             } else {
                 alignedSince = Date()
@@ -178,47 +197,76 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         }
     }
 
-    private func capture(frame: ARFrame, for point: GridPoint) {
+    /// Пытаемся снять полноразмерное фото с сенсора (у видеопотока ARKit всего ~2 Мп).
+    /// Если устройство/формат этого не умеет — переходим на обычные кадры видеопотока.
+    private func beginCapture(currentFrame: ARFrame, for point: GridPoint) {
         isSaving = true
+        guard useHighResolution else {
+            process(frame: currentFrame, for: point)
+            return
+        }
+        session.captureHighResolutionFrame(completion: { [weak self] highResFrame, _ in
+            guard let self else { return }
+            if let highResFrame {
+                self.process(frame: highResFrame, for: point)
+            } else {
+                self.useHighResolution = false
+                self.isSaving = false
+            }
+        })
+    }
+
+    private func process(frame: ARFrame, for point: GridPoint) {
         frameIndex += 1
         let index = frameIndex
 
-        // Рендерим картинку сразу здесь, в колбэке ARKit: буфер кадра переиспользуется
-        // и становится недействительным сразу после возврата из didUpdate.
-        // Сохраняем БЕЗ поворота: fx/fy/cx/cy от ARKit заданы именно для этой,
-        // исходной ориентации сенсора — поворот для склейки не нужен и всё портит.
+        // Рендерим картинку сразу: буфер кадра ARKit переиспользуется и после
+        // возврата из колбэка может быть перезаписан. Сохраняем БЕЗ поворота —
+        // параметры камеры заданы именно для исходной ориентации сенсора.
         let rawCIImage = CIImage(cvPixelBuffer: frame.capturedImage)
         guard let rawCGImage = ciContext.createCGImage(rawCIImage, from: rawCIImage.extent) else {
             isSaving = false
             return
         }
+
+        // Параметры камеры заданы относительно camera.imageResolution; если реальный
+        // снимок другого размера (фото в полном разрешении) — пересчитываем их.
         let intrinsics = frame.camera.intrinsics
+        let resolutionScale = Float(rawCGImage.width) / Float(frame.camera.imageResolution.width)
+        let fx = intrinsics.columns.0.x * resolutionScale
+        let fy = intrinsics.columns.1.y * resolutionScale
+        let cx = intrinsics.columns.2.x * resolutionScale
+        let cy = intrinsics.columns.2.y * resolutionScale
+
         let cameraTransform = frame.camera.transform
         let right = SIMD3<Float>(cameraTransform.columns.0.x, cameraTransform.columns.0.y, cameraTransform.columns.0.z)
         let up = SIMD3<Float>(cameraTransform.columns.1.x, cameraTransform.columns.1.y, cameraTransform.columns.1.z)
         let forward = -SIMD3<Float>(cameraTransform.columns.2.x, cameraTransform.columns.2.y, cameraTransform.columns.2.z)
+        let yaw = atan2(forward.x, -forward.z)
+        let pitch = asin(max(-1, min(1, forward.y)))
+        let halfTanX = Float(rawCGImage.width) / (2 * fx)
+        let halfTanY = Float(rawCGImage.height) / (2 * fy)
 
         DispatchQueue.global(qos: .userInitiated).async {
             let fileName = String(format: "frame_%03d.jpg", index)
             let fileURL = self.outputDirectory.appendingPathComponent(fileName)
             let rawImage = UIImage(cgImage: rawCGImage)
-            if let data = rawImage.jpegData(compressionQuality: 0.9) {
+            if let data = rawImage.jpegData(compressionQuality: 0.92) {
                 try? data.write(to: fileURL)
             }
-            // Для миниатюры в интерфейсе поворот не влияет на файл — это просто метка отображения
-            let displayImage = UIImage(cgImage: rawCGImage, scale: 1, orientation: .right)
-            let thumbnail = self.makeThumbnail(displayImage, maxDimension: 160)
+            let preview = self.makeThumbnail(rawImage, maxDimension: 640)
+            let panel = CapturedPanel(image: preview, cameraTransform: cameraTransform, halfTanX: halfTanX, halfTanY: halfTanY)
 
             let entry: [String: Any] = [
                 "file": fileName,
-                "yawRad": Double(point.yaw),
-                "pitchRad": Double(point.pitch),
+                "yawRad": Double(yaw),
+                "pitchRad": Double(pitch),
                 "width": rawCGImage.width,
                 "height": rawCGImage.height,
-                "fx": Double(intrinsics.columns.0.x),
-                "fy": Double(intrinsics.columns.1.y),
-                "cx": Double(intrinsics.columns.2.x),
-                "cy": Double(intrinsics.columns.2.y),
+                "fx": Double(fx),
+                "fy": Double(fy),
+                "cx": Double(cx),
+                "cy": Double(cy),
                 "rightX": Double(right.x), "rightY": Double(right.y), "rightZ": Double(right.z),
                 "upX": Double(up.x), "upY": Double(up.y), "upZ": Double(up.z),
                 "forwardX": Double(forward.x), "forwardY": Double(forward.y), "forwardZ": Double(forward.z)
@@ -229,9 +277,8 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 if let idx = self.gridPoints.firstIndex(where: { $0.id == point.id }) {
                     self.gridPoints[idx].captured = true
                 }
-                self.captureHistory.append(CaptureHistoryEntry(pointID: point.id, fileName: fileName, thumbnail: thumbnail))
-                self.capturedThumbnails[point.id] = thumbnail
-                self.lastCapturedImage = thumbnail
+                self.captureHistory.append(CaptureHistoryEntry(pointID: point.id, fileName: fileName))
+                self.capturedPanels[point.id] = panel
                 self.canUndo = true
                 self.alignedPointID = nil
                 self.isSaving = false
@@ -250,10 +297,9 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         if let idx = gridPoints.firstIndex(where: { $0.id == last.pointID }) {
             gridPoints[idx].captured = false
         }
-        capturedThumbnails[last.pointID] = nil
+        capturedPanels[last.pointID] = nil
         manifestEntries.removeAll { ($0["file"] as? String) == last.fileName }
         try? FileManager.default.removeItem(at: outputDirectory.appendingPathComponent(last.fileName))
-        lastCapturedImage = captureHistory.last?.thumbnail
         canUndo = !captureHistory.isEmpty
         let done = gridPoints.filter { $0.captured }.count
         statusText = "Кадр отменён. Снято \(done) из \(gridPoints.count)"
@@ -266,13 +312,12 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             try? FileManager.default.removeItem(at: outputDirectory.appendingPathComponent(entry.fileName))
         }
         captureHistory.removeAll()
-        capturedThumbnails.removeAll()
+        capturedPanels.removeAll()
         manifestEntries.removeAll()
         frameIndex = 0
         for idx in gridPoints.indices {
             gridPoints[idx].captured = false
         }
-        lastCapturedImage = nil
         canUndo = false
         alignedSince = nil
         alignedPointID = nil
@@ -283,7 +328,9 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         let size = image.size
         let scale = maxDimension / max(size.width, size.height)
         let targetSize = CGSize(width: size.width * scale, height: size.height * scale)
-        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1 // иначе на экране 3x получится картинка в 9 раз тяжелее
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
         return renderer.image { _ in
             image.draw(in: CGRect(origin: .zero, size: targetSize))
         }

@@ -52,12 +52,16 @@ enum AlignmentRefiner {
     }
 
     private static func alignedRecord(target: FrameRecord, anchor: FrameRecord) -> FrameRecord? {
+        // Для поиска совпадений полное разрешение не нужно — на уменьшенных копиях
+        // Vision работает в разы быстрее; параметры камеры масштабируем так же.
         guard
-            let anchorSource = CGImageSourceCreateWithURL(anchor.fileURL as CFURL, nil),
-            let anchorImage = CGImageSourceCreateImageAtIndex(anchorSource, 0, nil),
-            let targetSource = CGImageSourceCreateWithURL(target.fileURL as CFURL, nil),
-            let targetImage = CGImageSourceCreateImageAtIndex(targetSource, 0, nil)
+            let anchorSmall = PanoramaStitcher.downsampledImage(at: anchor.fileURL, maxPixelSize: 1280),
+            let targetSmall = PanoramaStitcher.downsampledImage(at: target.fileURL, maxPixelSize: 1280)
         else { return nil }
+        let anchorImage = anchorSmall.image
+        let targetImage = targetSmall.image
+        let sA = anchorSmall.scale
+        let sT = targetSmall.scale
 
         let request = VNHomographicImageRegistrationRequest(targetedCGImage: targetImage, options: [:])
         let handler = VNImageRequestHandler(cgImage: anchorImage, options: [:])
@@ -81,8 +85,8 @@ enum AlignmentRefiner {
             referenceSize: (anchorImage.width, anchorImage.height)
         )
 
-        let kAnchorInv = intrinsicsInverse(fx: anchor.fx, fy: anchor.fy, cx: anchor.cx, cy: anchor.cy)
-        let kTarget = intrinsicsMatrix(fx: target.fx, fy: target.fy, cx: target.cx, cy: target.cy)
+        let kAnchorInv = intrinsicsInverse(fx: anchor.fx * sA, fy: anchor.fy * sA, cx: anchor.cx * sA, cy: anchor.cy * sA)
+        let kTarget = intrinsicsMatrix(fx: target.fx * sT, fy: target.fy * sT, cx: target.cx * sT, cy: target.cy * sT)
         let r = orthonormalized(kAnchorInv * hPixel * kTarget)
 
         let angle = rotationAngle(r)

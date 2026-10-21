@@ -127,7 +127,7 @@ struct StitchView: View {
                 }
                 let cgImage = PanoramaStitcher.stitch(
                     frames: refinedFrames,
-                    outputSize: CGSize(width: 2048, height: 1024)
+                    outputSize: CGSize(width: 8192, height: 4096)
                 ) { value in
                     DispatchQueue.main.async { progress = 0.5 + value * 0.5 }
                 }

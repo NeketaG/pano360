@@ -103,184 +103,309 @@ enum PanoramaStitcher {
         }
     }
 
-    /// Склейка по данным ориентации. Каждый пиксель канваса принадлежит ровно
-    /// одному, самому "центральному" для него кадру (меньше шансов на размытость
-    /// от усреднения многих перекрывающихся кадров), а смешиваются только узкие
-    /// полосы точно на границе между соседними кадрами. Яркость кадров выравнивается
-    /// перед смешиванием, чтобы швы не были заметны из-за разной экспозиции.
+    /// Уменьшенная копия снимка без полного декодирования + во сколько раз она меньше оригинала.
+    static func downsampledImage(at url: URL, maxPixelSize: Int) -> (image: CGImage, scale: Float)? {
+        guard
+            let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+            let fullWidth = properties[kCGImagePropertyPixelWidth] as? Int, fullWidth > 0
+        else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceCreateThumbnailWithTransform: false
+        ]
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return (thumbnail, Float(thumbnail.width) / Float(fullWidth))
+    }
+
+    /// Склейка по ориентации кадров. Каждый пиксель итоговой панорамы берётся из
+    /// самого "центрального" для него кадра, смешиваются только узкие полосы на
+    /// границах между соседями. Яркость кадров выравнивается перед смешиванием.
+    ///
+    /// Буферы компактные (цвет — 4 байта, "центральность" — 1 байт), чтобы панорама
+    /// 8192×4096 помещалась в память телефона, а строки считаются параллельно.
     static func stitch(frames: [FrameRecord], outputSize: CGSize, progress: ((Double) -> Void)? = nil) -> CGImage? {
         let width = Int(outputSize.width)
         let height = Int(outputSize.height)
-        let pixelCount = width * height
+        guard width > 0, height > 0, !frames.isEmpty else { return nil }
 
-        var bestColor = [SIMD3<Float>](repeating: .zero, count: pixelCount)
-        var bestCentrality = [Float](repeating: -1, count: pixelCount)
-        var secondColor = [SIMD3<Float>](repeating: .zero, count: pixelCount)
-        var secondCentrality = [Float](repeating: -1, count: pixelCount)
-
-        struct LoadedFrame {
-            let record: FrameRecord
-            let width: Int
-            let height: Int
-            let pixels: [UInt8]
-            let luminance: Float
+        // Яркость меряем по уменьшенным копиям — быстро и без лишней памяти.
+        let luminances: [Float] = frames.map { record in
+            guard let small = downsampledImage(at: record.fileURL, maxPixelSize: 256)?.image else { return 0 }
+            return withPixelBytes(of: small) { pixels, w, h in
+                averageLuminance(pixels, pixelCount: w * h)
+            } ?? 0
         }
+        let measured = luminances.filter { $0 > 1 }
+        let targetLuminance = measured.isEmpty ? 128 : measured.reduce(0, +) / Float(measured.count)
 
-        let loadedFrames: [LoadedFrame] = frames.compactMap { record in
-            guard
-                let source = CGImageSourceCreateWithURL(record.fileURL as CFURL, nil),
-                let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil),
-                let pixels = pixelBytes(of: cgImage)
-            else { return nil }
-            return LoadedFrame(
-                record: record, width: cgImage.width, height: cgImage.height,
-                pixels: pixels, luminance: averageLuminance(pixels)
-            )
-        }
-        guard !loadedFrames.isEmpty else { return nil }
+        let canvas = Canvas(width: width, height: height)
 
-        let targetLuminance = loadedFrames.map(\.luminance).reduce(0, +) / Float(loadedFrames.count)
-
-        for (index, frame) in loadedFrames.enumerated() {
-            let exposureScale = frame.luminance > 1 ? min(max(targetLuminance / frame.luminance, 0.5), 2.0) : 1
-            rasterize(
-                record: frame.record, srcWidth: frame.width, srcHeight: frame.height,
-                pixels: frame.pixels, exposureScale: exposureScale,
-                bestColor: &bestColor, bestCentrality: &bestCentrality,
-                secondColor: &secondColor, secondCentrality: &secondCentrality,
-                canvasWidth: width, canvasHeight: height
-            )
-            progress?(Double(index + 1) / Double(loadedFrames.count))
-        }
-
-        let blendMargin: Float = 0.25
-        var outputColor = [SIMD3<Float>](repeating: .zero, count: pixelCount)
-        var covered = [Bool](repeating: false, count: pixelCount)
-        for i in 0..<pixelCount {
-            guard bestCentrality[i] >= 0 else { continue }
-            covered[i] = true
-            var color = bestColor[i]
-            if secondCentrality[i] >= 0 {
-                let diff = bestCentrality[i] - secondCentrality[i]
-                if diff < blendMargin {
-                    let alpha = 0.5 * (1 - diff / blendMargin)
-                    color = bestColor[i] * (1 - alpha) + secondColor[i] * alpha
+        for (index, record) in frames.enumerated() {
+            autoreleasepool {
+                guard
+                    let source = CGImageSourceCreateWithURL(record.fileURL as CFURL, nil),
+                    let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+                else { return }
+                let luminance = luminances[index]
+                let exposureScale = luminance > 1 ? min(max(targetLuminance / luminance, 0.5), 2.0) : 1
+                _ = withPixelBytes(of: cgImage) { pixels, w, h in
+                    rasterize(record: record, pixels: pixels, srcWidth: w, srcHeight: h, exposureScale: exposureScale, canvas: canvas)
                 }
             }
-            outputColor[i] = color
+            progress?(Double(index + 1) / Double(frames.count))
         }
 
-        // Между соседними кадрами иногда остаются непокрытые дыры (особенно по
-        // диагонали между рядами) — затягиваем их цветом ближайшего готового пикселя.
-        fillGaps(color: &outputColor, covered: &covered, width: width, height: height)
+        canvas.blendSeams()
+        canvas.fillGaps()
 
-        var outputBytes = [UInt8](repeating: 0, count: pixelCount * 4)
-        for i in 0..<pixelCount {
-            let o = i * 4
-            if covered[i] {
-                outputBytes[o]     = UInt8(clamping: Int(outputColor[i].x))
-                outputBytes[o + 1] = UInt8(clamping: Int(outputColor[i].y))
-                outputBytes[o + 2] = UInt8(clamping: Int(outputColor[i].z))
-            }
-            outputBytes[o + 3] = 255
-        }
-
-        return makeCGImage(from: outputBytes, width: width, height: height)
+        let data = Data(bytes: canvas.bestColor, count: width * height * 4)
+        return makeCGImage(from: data, width: width, height: height)
     }
 
     private static func rasterize(
-        record: FrameRecord, srcWidth: Int, srcHeight: Int, pixels: [UInt8], exposureScale: Float,
-        bestColor: inout [SIMD3<Float>], bestCentrality: inout [Float],
-        secondColor: inout [SIMD3<Float>], secondCentrality: inout [Float],
-        canvasWidth: Int, canvasHeight: Int
+        record: FrameRecord, pixels: UnsafePointer<UInt8>, srcWidth: Int, srcHeight: Int,
+        exposureScale: Float, canvas: Canvas
     ) {
-        let halfFOVYaw = atan(Float(srcWidth) / (2 * record.fx))
-        let halfFOVPitch = atan(Float(srcHeight) / (2 * record.fy))
-        // запас 20%, чтобы не терять края кадра при неточной оценке границ
-        let yawRange = min(halfFOVYaw * 1.2, .pi)
-        let pitchRange = min(halfFOVPitch * 1.2, .pi / 2)
-
+        let tanHalfX = Float(srcWidth) / (2 * record.fx)
+        let tanHalfY = Float(srcHeight) / (2 * record.fy)
         let forward = record.forward
         let right = record.right
         let up = record.up
 
-        let uMin = Int((((record.yaw - yawRange) / (2 * .pi)) + 0.5) * Float(canvasWidth))
-        let uMax = Int((((record.yaw + yawRange) / (2 * .pi)) + 0.5) * Float(canvasWidth))
-        let vMin = max(0, Int((0.5 - (record.pitch + pitchRange) / .pi) * Float(canvasHeight)))
-        let vMax = min(canvasHeight - 1, Int((0.5 - (record.pitch - pitchRange) / .pi) * Float(canvasHeight)))
+        // Кадр — это "пятно" на сфере вокруг направления съёмки радиусом до угла кадра
+        // (половина диагонали). Пятно у полюса захватывает все долготы, у горизонта —
+        // узкую полосу. Раньше область считалась без этого и края кадров у полюсов обрезались.
+        let centerYaw = atan2(forward.x, -forward.z)
+        let centerPitch = asin(max(-1, min(1, forward.y)))
+        let radius = min(atan(sqrt(tanHalfX * tanHalfX + tanHalfY * tanHalfY)) * 1.02, .pi / 2)
+        let pitchTop = centerPitch + radius
+        let pitchBottom = centerPitch - radius
 
-        guard vMin <= vMax, uMin <= uMax else { return }
+        let width = canvas.width
+        let height = canvas.height
+        let vMin = max(0, Int((0.5 - min(pitchTop, .pi / 2) / .pi) * Float(height)))
+        let vMax = min(height - 1, Int(((0.5 - max(pitchBottom, -.pi / 2) / .pi) * Float(height)).rounded(.up)))
+        guard vMin <= vMax else { return }
 
-        let tanHalfYaw = Float(srcWidth) / (2 * record.fx)
-        let tanHalfPitch = Float(srcHeight) / (2 * record.fy)
+        var uMin = 0
+        var uMax = width - 1
+        if pitchTop < .pi / 2, pitchBottom > -.pi / 2 {
+            let yawHalf = asin(min(1, sin(radius) / cos(centerPitch))) * 1.02
+            let lo = Int((((centerYaw - yawHalf) / (2 * .pi)) + 0.5) * Float(width)) - 1
+            let hi = Int((((centerYaw + yawHalf) / (2 * .pi)) + 0.5) * Float(width)) + 1
+            if hi - lo < width {
+                uMin = lo
+                uMax = hi
+            }
+        }
 
-        for v in vMin...vMax {
-            let phi = (0.5 - Float(v) / Float(canvasHeight)) * .pi
+        let maxX = Float(srcWidth - 1)
+        let maxY = Float(srcHeight - 1)
+
+        DispatchQueue.concurrentPerform(iterations: vMax - vMin + 1) { row in
+            let v = vMin + row
+            let cosPhi = canvas.cosPhi[v]
+            let sinPhi = canvas.sinPhi[v]
+            let rowBase = v * width
+
             for uRaw in uMin...uMax {
-                let u = ((uRaw % canvasWidth) + canvasWidth) % canvasWidth
-                let theta = (Float(u) / Float(canvasWidth) - 0.5) * 2 * .pi
+                var u = uRaw % width
+                if u < 0 { u += width }
 
-                let direction = SIMD3<Float>(
-                    cos(phi) * sin(theta),
-                    sin(phi),
-                    -cos(phi) * cos(theta)
-                )
+                let dx = cosPhi * canvas.sinTheta[u]
+                let dy = sinPhi
+                let dz = -cosPhi * canvas.cosTheta[u]
 
-                let rayX = dot(direction, right)
-                let rayY = dot(direction, up)
-                let rayZ = -dot(direction, forward)
-                guard rayZ < -1e-4 else { continue }
-                let depth = -rayZ
+                let depth = dx * forward.x + dy * forward.y + dz * forward.z
+                if depth <= 1e-4 { continue }
 
-                let ndcX = rayX / depth
-                let ndcY = rayY / depth
+                let ndcX = (dx * right.x + dy * right.y + dz * right.z) / depth
+                let ndcY = (dx * up.x + dy * up.y + dz * up.z) / depth
+                let edge = min(1 - abs(ndcX) / tanHalfX, 1 - abs(ndcY) / tanHalfY)
+                if edge <= 0 { continue }
 
                 let srcX = record.fx * ndcX + record.cx
                 let srcY = record.cy - record.fy * ndcY
-                guard srcX >= 0, srcX < Float(srcWidth - 1), srcY >= 0, srcY < Float(srcHeight - 1) else { continue }
+                if srcX < 0 || srcX >= maxX || srcY < 0 || srcY >= maxY { continue }
 
-                let edgeX = 1 - abs(ndcX) / tanHalfYaw
-                let edgeY = 1 - abs(ndcY) / tanHalfPitch
-                let centrality = max(0, min(edgeX, edgeY))
-                guard centrality > 0 else { continue }
+                let rank = UInt8(max(1, min(255, Int(edge * 255))))
+                let index = rowBase + u
+                if rank <= canvas.secondRank[index] { continue }
 
-                var color = bilinearSample(pixels, width: srcWidth, x: srcX, y: srcY) * exposureScale
-                color = SIMD3<Float>(min(max(color.x, 0), 255), min(max(color.y, 0), 255), min(max(color.z, 0), 255))
-
-                let index = v * canvasWidth + u
-                if centrality > bestCentrality[index] {
-                    secondCentrality[index] = bestCentrality[index]
-                    secondColor[index] = bestColor[index]
-                    bestCentrality[index] = centrality
-                    bestColor[index] = color
-                } else if centrality > secondCentrality[index] {
-                    secondCentrality[index] = centrality
-                    secondColor[index] = color
+                let color = sample(pixels, width: srcWidth, x: srcX, y: srcY, scale: exposureScale)
+                if rank > canvas.bestRank[index] {
+                    canvas.secondRank[index] = canvas.bestRank[index]
+                    canvas.secondColor[index] = canvas.bestColor[index]
+                    canvas.bestRank[index] = rank
+                    canvas.bestColor[index] = color
+                } else {
+                    canvas.secondRank[index] = rank
+                    canvas.secondColor[index] = color
                 }
             }
         }
     }
 
-    private static func fillGaps(color: inout [SIMD3<Float>], covered: inout [Bool], width: Int, height: Int) {
+    /// Билинейная выборка из RGBA-буфера с поправкой яркости, результат упакован в RGBA (UInt32).
+    @inline(__always)
+    private static func sample(_ pixels: UnsafePointer<UInt8>, width: Int, x: Float, y: Float, scale: Float) -> UInt32 {
+        let x0 = Int(x), y0 = Int(y)
+        let fx = x - Float(x0), fy = y - Float(y0)
+        let i00 = (y0 * width + x0) * 4
+        let i10 = i00 + 4
+        let i01 = i00 + width * 4
+        let i11 = i01 + 4
+
+        let w00 = (1 - fx) * (1 - fy)
+        let w10 = fx * (1 - fy)
+        let w01 = (1 - fx) * fy
+        let w11 = fx * fy
+
+        func channel(_ c: Int) -> UInt32 {
+            let value = (Float(pixels[i00 + c]) * w00 + Float(pixels[i10 + c]) * w10
+                + Float(pixels[i01 + c]) * w01 + Float(pixels[i11 + c]) * w11) * scale
+            return UInt32(max(0, min(255, value)))
+        }
+
+        return channel(0) | (channel(1) << 8) | (channel(2) << 16) | (255 << 24)
+    }
+
+    /// Отрисовывает картинку в RGBA-буфер и даёт к нему доступ на время `body`.
+    private static func withPixelBytes<T>(of cgImage: CGImage, _ body: (UnsafePointer<UInt8>, Int, Int) -> T) -> T? {
+        let width = cgImage.width
+        let height = cgImage.height
+        let byteCount = width * height * 4
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: byteCount)
+        defer { buffer.deallocate() }
+        buffer.initialize(repeating: 0, count: byteCount)
+
+        guard let context = CGContext(
+            data: buffer, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return body(UnsafePointer(buffer), width, height)
+    }
+
+    private static func averageLuminance(_ pixels: UnsafePointer<UInt8>, pixelCount: Int) -> Float {
+        guard pixelCount > 0 else { return 128 }
+        var sum: Float = 0
+        for p in 0..<pixelCount {
+            let i = p * 4
+            sum += 0.299 * Float(pixels[i]) + 0.587 * Float(pixels[i + 1]) + 0.114 * Float(pixels[i + 2])
+        }
+        return sum / Float(pixelCount)
+    }
+
+    private static func makeCGImage(from data: Data, width: Int, height: Int) -> CGImage? {
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        return CGImage(
+            width: width, height: height,
+            bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+        )
+    }
+}
+
+/// Рабочие буферы итоговой панорамы. Для каждого пикселя храним два лучших
+/// кандидата (цвет + насколько близко пиксель к центру своего кадра, 0 = не покрыт).
+private final class Canvas {
+    let width: Int
+    let height: Int
+    let bestColor: UnsafeMutablePointer<UInt32>
+    let secondColor: UnsafeMutablePointer<UInt32>
+    let bestRank: UnsafeMutablePointer<UInt8>
+    let secondRank: UnsafeMutablePointer<UInt8>
+    let sinTheta: UnsafeMutablePointer<Float>
+    let cosTheta: UnsafeMutablePointer<Float>
+    let sinPhi: UnsafeMutablePointer<Float>
+    let cosPhi: UnsafeMutablePointer<Float>
+
+    init(width: Int, height: Int) {
+        self.width = width
+        self.height = height
+        let count = width * height
+
+        bestColor = .allocate(capacity: count)
+        bestColor.initialize(repeating: 0xFF00_0000, count: count)
+        secondColor = .allocate(capacity: count)
+        secondColor.initialize(repeating: 0xFF00_0000, count: count)
+        bestRank = .allocate(capacity: count)
+        bestRank.initialize(repeating: 0, count: count)
+        secondRank = .allocate(capacity: count)
+        secondRank.initialize(repeating: 0, count: count)
+
+        // Тригонометрия по столбцам/строкам одна на все кадры.
+        sinTheta = .allocate(capacity: width)
+        cosTheta = .allocate(capacity: width)
+        for u in 0..<width {
+            let theta = (Float(u) / Float(width) - 0.5) * 2 * .pi
+            (sinTheta + u).initialize(to: sin(theta))
+            (cosTheta + u).initialize(to: cos(theta))
+        }
+        sinPhi = .allocate(capacity: height)
+        cosPhi = .allocate(capacity: height)
+        for v in 0..<height {
+            let phi = (0.5 - Float(v) / Float(height)) * .pi
+            (sinPhi + v).initialize(to: sin(phi))
+            (cosPhi + v).initialize(to: cos(phi))
+        }
+    }
+
+    deinit {
+        bestColor.deallocate()
+        secondColor.deallocate()
+        bestRank.deallocate()
+        secondRank.deallocate()
+        sinTheta.deallocate()
+        cosTheta.deallocate()
+        sinPhi.deallocate()
+        cosPhi.deallocate()
+    }
+
+    /// Там, где два кадра почти одинаково "центральны", плавно смешиваем их,
+    /// чтобы на стыке не было резкого перехода.
+    func blendSeams() {
+        let blendMargin = 64 // ≈ четверть шкалы 0…255
+        DispatchQueue.concurrentPerform(iterations: height) { v in
+            let rowBase = v * width
+            for i in rowBase..<(rowBase + width) {
+                let best = Int(bestRank[i])
+                let second = Int(secondRank[i])
+                guard best > 0, second > 0 else { continue }
+                let diff = best - second
+                guard diff < blendMargin else { continue }
+                let alpha = 0.5 * (1 - Float(diff) / Float(blendMargin))
+                bestColor[i] = Self.mix(bestColor[i], secondColor[i], alpha)
+            }
+        }
+    }
+
+    /// Пиксели, куда не дотянулся ни один кадр, затягиваем цветом соседей.
+    func fillGaps() {
         for _ in 0..<12 {
             var changed = false
             for y in 0..<height {
-                let rowStart = y * width
+                let rowBase = y * width
                 for x in 0..<width {
-                    let idx = rowStart + x
-                    guard !covered[idx] else { continue }
-
-                    let leftIdx = rowStart + ((x - 1 + width) % width)
-                    let rightIdx = rowStart + ((x + 1) % width)
+                    let i = rowBase + x
+                    guard bestRank[i] == 0 else { continue }
+                    let left = rowBase + (x == 0 ? width - 1 : x - 1)
+                    let right = rowBase + (x == width - 1 ? 0 : x + 1)
                     var donor = -1
-                    if covered[leftIdx] { donor = leftIdx }
-                    else if covered[rightIdx] { donor = rightIdx }
-                    else if y > 0, covered[idx - width] { donor = idx - width }
-                    else if y < height - 1, covered[idx + width] { donor = idx + width }
-
+                    if bestRank[left] > 0 { donor = left }
+                    else if bestRank[right] > 0 { donor = right }
+                    else if y > 0, bestRank[i - width] > 0 { donor = i - width }
+                    else if y < height - 1, bestRank[i + width] > 0 { donor = i + width }
                     if donor >= 0 {
-                        color[idx] = color[donor]
-                        covered[idx] = true
+                        bestColor[i] = bestColor[donor]
+                        bestRank[i] = 1
                         changed = true
                     }
                 }
@@ -289,66 +414,12 @@ enum PanoramaStitcher {
         }
     }
 
-    private static func pixelBytes(of cgImage: CGImage) -> [UInt8]? {
-        let width = cgImage.width
-        let height = cgImage.height
-        let bufferSize = width * height * 4
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
-        defer { buffer.deallocate() }
-        buffer.initialize(repeating: 0, count: bufferSize)
-
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let context = CGContext(
-            data: buffer, width: width, height: height,
-            bitsPerComponent: 8, bytesPerRow: width * 4,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return Array(UnsafeBufferPointer(start: buffer, count: bufferSize))
-    }
-
-    private static func averageLuminance(_ pixels: [UInt8]) -> Float {
-        let totalPixels = pixels.count / 4
-        guard totalPixels > 0 else { return 128 }
-        let samplingStride = max(1, totalPixels / 20000)
-        var sum: Float = 0
-        var count = 0
-        var p = 0
-        while p < totalPixels {
-            let i = p * 4
-            sum += 0.299 * Float(pixels[i]) + 0.587 * Float(pixels[i + 1]) + 0.114 * Float(pixels[i + 2])
-            count += 1
-            p += samplingStride
+    private static func mix(_ a: UInt32, _ b: UInt32, _ t: Float) -> UInt32 {
+        func channel(_ shift: UInt32) -> UInt32 {
+            let ca = Float((a >> shift) & 0xFF)
+            let cb = Float((b >> shift) & 0xFF)
+            return UInt32(ca * (1 - t) + cb * t) << shift
         }
-        return count > 0 ? sum / Float(count) : 128
-    }
-
-    private static func bilinearSample(_ pixels: [UInt8], width: Int, x: Float, y: Float) -> SIMD3<Float> {
-        let x0 = Int(x), y0 = Int(y)
-        let x1 = x0 + 1, y1 = y0 + 1
-        let fracX = x - Float(x0), fracY = y - Float(y0)
-
-        func at(_ px: Int, _ py: Int) -> SIMD3<Float> {
-            let i = (py * width + px) * 4
-            return SIMD3<Float>(Float(pixels[i]), Float(pixels[i + 1]), Float(pixels[i + 2]))
-        }
-
-        let top = at(x0, y0) * (1 - fracX) + at(x1, y0) * fracX
-        let bottom = at(x0, y1) * (1 - fracX) + at(x1, y1) * fracX
-        return top * (1 - fracY) + bottom * fracY
-    }
-
-    private static func makeCGImage(from bytes: [UInt8], width: Int, height: Int) -> CGImage? {
-        let data = Data(bytes)
-        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        return CGImage(
-            width: width, height: height,
-            bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
-            space: colorSpace,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
-        )
+        return channel(0) | channel(8) | channel(16) | (255 << 24)
     }
 }

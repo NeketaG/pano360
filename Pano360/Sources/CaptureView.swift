@@ -15,11 +15,7 @@ struct CaptureView: View {
 
     var body: some View {
         ZStack {
-            ARViewRepresentable(
-                session: capture.session,
-                gridPoints: capture.gridPoints,
-                capturedThumbnails: capture.capturedThumbnails
-            )
+            ARViewRepresentable(session: capture.session, panels: capture.capturedPanels)
             .ignoresSafeArea()
 
             GeometryReader { geo in
@@ -183,8 +179,7 @@ private struct MarkerView: View {
 /// а не плоская накладка поверх экрана.
 private struct ARViewRepresentable: UIViewRepresentable {
     let session: ARSession
-    let gridPoints: [GridPoint]
-    let capturedThumbnails: [GridPoint.ID: UIImage]
+    let panels: [GridPoint.ID: CapturedPanel]
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -197,64 +192,48 @@ private struct ARViewRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: ARSCNView, context: Context) {
-        context.coordinator.sync(gridPoints: gridPoints, thumbnails: capturedThumbnails)
+        context.coordinator.sync(panels: panels)
     }
 
     final class Coordinator {
         weak var scene: SCNScene?
         private var nodes: [GridPoint.ID: SCNNode] = [:]
 
-        func sync(gridPoints: [GridPoint], thumbnails: [GridPoint.ID: UIImage]) {
+        func sync(panels: [GridPoint.ID: CapturedPanel]) {
             guard let scene else { return }
 
-            for point in gridPoints {
-                guard nodes[point.id] == nil, let thumbnail = thumbnails[point.id] else { continue }
-                let node = Self.makePlaneNode(point: point, image: thumbnail)
+            for (id, panel) in panels where nodes[id] == nil {
+                let node = Self.makePlaneNode(panel: panel)
                 scene.rootNode.addChildNode(node)
-                nodes[point.id] = node
+                nodes[id] = node
             }
 
-            for (id, node) in nodes where thumbnails[id] == nil {
+            for (id, node) in nodes where panels[id] == nil {
                 node.removeFromParentNode()
                 nodes[id] = nil
             }
         }
 
-        private static func makePlaneNode(point: GridPoint, image: UIImage) -> SCNNode {
+        /// Плоскость ставится ровно туда, где в момент снимка была "картинка" камеры:
+        /// в её же системе координат, на расстоянии `distance` перед объективом,
+        /// размером с реальный угол обзора. Оси плоскости совпадают с осями камеры,
+        /// поэтому снимок не зеркалится и не поворачивается, а соседние кадры
+        /// перекрываются так же, как перекрываются настоящие фото.
+        private static func makePlaneNode(panel: CapturedPanel) -> SCNNode {
             let distance: Float = 2
-            let angularWidth: Float = 28 * .pi / 180
-            let angularHeight: Float = 38 * .pi / 180
-            let width = CGFloat(2 * distance * tan(angularWidth / 2))
-            let height = CGFloat(2 * distance * tan(angularHeight / 2))
-
-            let plane = SCNPlane(width: width, height: height)
-            plane.firstMaterial?.diffuse.contents = image
+            let plane = SCNPlane(
+                width: CGFloat(2 * distance * panel.halfTanX),
+                height: CGFloat(2 * distance * panel.halfTanY)
+            )
+            plane.firstMaterial?.diffuse.contents = panel.image
             plane.firstMaterial?.isDoubleSided = true
             plane.firstMaterial?.lightingModel = .constant
 
-            let direction = SIMD3<Float>(
-                cos(point.pitch) * sin(point.yaw),
-                sin(point.pitch),
-                -cos(point.pitch) * cos(point.yaw)
-            )
-            let position = direction * distance
-
-            // Нормаль плоскости должна смотреть на пользователя (к началу координат),
-            // то есть в сторону, противоположную направлению съёмки.
-            let forward = -direction
-            let worldUp = SIMD3<Float>(0, 1, 0)
-            var right = cross(forward, worldUp)
-            if length(right) < 1e-4 { right = SIMD3<Float>(1, 0, 0) }
-            right = normalize(right)
-            let up = cross(right, forward)
+            var offset = matrix_identity_float4x4
+            offset.columns.3.z = -distance
 
             let node = SCNNode(geometry: plane)
-            node.simdTransform = simd_float4x4(columns: (
-                SIMD4<Float>(right, 0),
-                SIMD4<Float>(up, 0),
-                SIMD4<Float>(forward, 0),
-                SIMD4<Float>(position, 1)
-            ))
+            node.simdTransform = panel.cameraTransform * offset
             return node
         }
     }
