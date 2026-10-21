@@ -206,12 +206,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             process(frame: currentFrame, for: point, isHighResolution: false)
             return
         }
-        let settings = AVCapturePhotoSettings()
-        if #available(iOS 18.0, *) {
-            // Без звука затвора — отклик даёт вибрация.
-            settings.isShutterSoundSuppressionEnabled = true
-        }
-        session.captureHighResolutionFrame(using: settings) { [weak self] highResFrame, _ in
+        session.captureHighResolutionFrame { [weak self] highResFrame, _ in
             guard let self else { return }
             if let highResFrame {
                 self.process(frame: highResFrame, for: point, isHighResolution: true)
