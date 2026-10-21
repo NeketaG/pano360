@@ -203,21 +203,26 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     private func beginCapture(currentFrame: ARFrame, for point: GridPoint) {
         isSaving = true
         guard useHighResolution else {
-            process(frame: currentFrame, for: point)
+            process(frame: currentFrame, for: point, isHighResolution: false)
             return
         }
-        session.captureHighResolutionFrame(completion: { [weak self] highResFrame, _ in
+        let settings = AVCapturePhotoSettings()
+        if #available(iOS 18.0, *) {
+            // Без звука затвора — отклик даёт вибрация.
+            settings.isShutterSoundSuppressionEnabled = true
+        }
+        session.captureHighResolutionFrame(using: settings) { [weak self] highResFrame, _ in
             guard let self else { return }
             if let highResFrame {
-                self.process(frame: highResFrame, for: point)
+                self.process(frame: highResFrame, for: point, isHighResolution: true)
             } else {
                 self.useHighResolution = false
                 self.isSaving = false
             }
-        })
+        }
     }
 
-    private func process(frame: ARFrame, for point: GridPoint) {
+    private func process(frame: ARFrame, for point: GridPoint, isHighResolution: Bool) {
         frameIndex += 1
         let index = frameIndex
         DispatchQueue.main.async {
@@ -237,8 +242,9 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         // снимок другого размера (фото в полном разрешении) — пересчитываем их.
         let intrinsics = frame.camera.intrinsics
         let resolutionScale = Float(rawCGImage.width) / Float(frame.camera.imageResolution.width)
-        let fx = intrinsics.columns.0.x * resolutionScale
-        let fy = intrinsics.columns.1.y * resolutionScale
+        let focalCorrection = isHighResolution ? PanoramaStitcher.highResolutionFocalCorrection : 1
+        let fx = intrinsics.columns.0.x * resolutionScale * focalCorrection
+        let fy = intrinsics.columns.1.y * resolutionScale * focalCorrection
         let cx = intrinsics.columns.2.x * resolutionScale
         let cy = intrinsics.columns.2.y * resolutionScale
 
@@ -271,6 +277,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 "fy": Double(fy),
                 "cx": Double(cx),
                 "cy": Double(cy),
+                "intrinsicsCorrected": true,
                 "rightX": Double(right.x), "rightY": Double(right.y), "rightZ": Double(right.z),
                 "upX": Double(up.x), "upY": Double(up.y), "upZ": Double(up.z),
                 "forwardX": Double(forward.x), "forwardY": Double(forward.y), "forwardZ": Double(forward.z)

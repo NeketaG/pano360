@@ -5,3 +5,4 @@ artifact/
 dist/
 DerivedData/
 .DS_Store
+tests/
