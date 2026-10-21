@@ -18,6 +18,8 @@ targets:
         NSCameraUsageDescription: "Камера нужна для съёмки панорамы 360°."
         NSPhotoLibraryAddUsageDescription: "Чтобы сохранить готовую панораму в Фото."
         NSLocationWhenInUseUsageDescription: "Чтобы отметить, где снята панорама."
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.domenic.pano360

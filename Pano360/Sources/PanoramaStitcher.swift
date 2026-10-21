@@ -381,7 +381,9 @@ private final class Canvas {
     /// Там, где два кадра почти одинаково "центральны", плавно смешиваем их,
     /// чтобы на стыке не было резкого перехода.
     func blendSeams() {
-        let blendMargin = 64 // ≈ четверть шкалы 0…255
+        // Узкая полоса: если соседние кадры совпали неидеально, широкое смешивание
+        // даёт размытый "двойной" край, а узкое — почти незаметный стык.
+        let blendMargin = 32
         DispatchQueue.concurrentPerform(iterations: height) { v in
             let rowBase = v * width
             for i in rowBase..<(rowBase + width) {

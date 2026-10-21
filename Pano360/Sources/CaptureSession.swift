@@ -56,6 +56,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     private var manifestEntries: [[String: Any]] = []
     private var captureHistory: [CaptureHistoryEntry] = []
     private let ciContext = CIContext()
+    private let haptics = UIImpactFeedbackGenerator(style: .medium)
 
     override init() {
         var points: [GridPoint] = []
@@ -219,6 +220,9 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
     private func process(frame: ARFrame, for point: GridPoint) {
         frameIndex += 1
         let index = frameIndex
+        DispatchQueue.main.async {
+            self.haptics.impactOccurred()
+        }
 
         // Рендерим картинку сразу: буфер кадра ARKit переиспользуется и после
         // возврата из колбэка может быть перезаписан. Сохраняем БЕЗ поворота —
