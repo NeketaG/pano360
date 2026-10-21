@@ -179,22 +179,30 @@ enum PanoramaStitcher {
         // узкую полосу. Раньше область считалась без этого и края кадров у полюсов обрезались.
         let centerYaw = atan2(forward.x, -forward.z)
         let centerPitch = asin(max(-1, min(1, forward.y)))
-        let radius = min(atan(sqrt(tanHalfX * tanHalfX + tanHalfY * tanHalfY)) * 1.02, .pi / 2)
+        let halfDiagonal: Float = atan(sqrt(tanHalfX * tanHalfX + tanHalfY * tanHalfY))
+        let radius: Float = min(halfDiagonal * 1.02, Float.pi / 2)
         let pitchTop = centerPitch + radius
         let pitchBottom = centerPitch - radius
 
         let width = canvas.width
         let height = canvas.height
-        let vMin = max(0, Int((0.5 - min(pitchTop, .pi / 2) / .pi) * Float(height)))
-        let vMax = min(height - 1, Int(((0.5 - max(pitchBottom, -.pi / 2) / .pi) * Float(height)).rounded(.up)))
+        let halfPi = Float.pi / 2
+        let topRow: Float = (0.5 - min(pitchTop, halfPi) / Float.pi) * Float(height)
+        let bottomRow: Float = (0.5 - max(pitchBottom, -halfPi) / Float.pi) * Float(height)
+        let vMin = max(0, Int(topRow))
+        let vMax = min(height - 1, Int(bottomRow.rounded(.up)))
         guard vMin <= vMax else { return }
 
         var uMin = 0
         var uMax = width - 1
-        if pitchTop < .pi / 2, pitchBottom > -.pi / 2 {
-            let yawHalf = asin(min(1, sin(radius) / cos(centerPitch))) * 1.02
-            let lo = Int((((centerYaw - yawHalf) / (2 * .pi)) + 0.5) * Float(width)) - 1
-            let hi = Int((((centerYaw + yawHalf) / (2 * .pi)) + 0.5) * Float(width)) + 1
+        if pitchTop < halfPi, pitchBottom > -halfPi {
+            let ratio: Float = min(1, sin(radius) / cos(centerPitch))
+            let yawHalf: Float = asin(ratio) * 1.02
+            let twoPi = 2 * Float.pi
+            let loColumn: Float = ((centerYaw - yawHalf) / twoPi + 0.5) * Float(width)
+            let hiColumn: Float = ((centerYaw + yawHalf) / twoPi + 0.5) * Float(width)
+            let lo = Int(loColumn) - 1
+            let hi = Int(hiColumn) + 1
             if hi - lo < width {
                 uMin = lo
                 uMax = hi
@@ -264,9 +272,10 @@ enum PanoramaStitcher {
         let w11 = fx * fy
 
         func channel(_ c: Int) -> UInt32 {
-            let value = (Float(pixels[i00 + c]) * w00 + Float(pixels[i10 + c]) * w10
-                + Float(pixels[i01 + c]) * w01 + Float(pixels[i11 + c]) * w11) * scale
-            return UInt32(max(0, min(255, value)))
+            let top: Float = Float(pixels[i00 + c]) * w00 + Float(pixels[i10 + c]) * w10
+            let bottom: Float = Float(pixels[i01 + c]) * w01 + Float(pixels[i11 + c]) * w11
+            let value: Float = (top + bottom) * scale
+            return UInt32(max(Float(0), min(Float(255), value)))
         }
 
         return channel(0) | (channel(1) << 8) | (channel(2) << 16) | (255 << 24)
