@@ -122,8 +122,9 @@ struct StitchView: View {
                     DispatchQueue.main.async { errorText = "В этой съёмке нет кадров."; isRecomputing = false }
                     return
                 }
+                let refinedFrames = PoseRefiner.refine(frames: manifest.frames)
                 let cgImage = PanoramaStitcher.stitch(
-                    frames: manifest.frames,
+                    frames: refinedFrames,
                     outputSize: CGSize(width: 8192, height: 4096)
                 ) { value in
                     DispatchQueue.main.async { progress = value }
