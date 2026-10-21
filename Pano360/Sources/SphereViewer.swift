@@ -59,7 +59,10 @@ struct SphereViewer: UIViewRepresentable {
         @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
             guard let cameraNode else { return }
             let translation = gesture.translation(in: gesture.view)
-            let sensitivity: Float = 0.005
+            // При приближении (меньший угол обзора) то же движение пальца должно
+            // поворачивать меньше — иначе изображение "улетает" из-под пальца.
+            let fieldOfView = Float(cameraNode.camera?.fieldOfView ?? 80)
+            let sensitivity: Float = 0.005 * fieldOfView / 80
 
             // Знак подобран так, чтобы изображение "тянулось" за пальцем,
             // как фотография, а не камера крутилась вслед за свайпом.
