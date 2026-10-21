@@ -11,6 +11,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Liquid Glass и другие API iOS 26 доступны только с Xcode 26 (iOS 26 SDK).
+      - name: Select Xcode 26
+        run: |
+          ls -d /Applications/Xcode*.app
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "::error::Xcode 26 не найден на этом образе"
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          grep -rn "captureHighResolutionFrame" \
+            "$(xcrun --sdk iphoneos --show-sdk-path)/System/Library/Frameworks/ARKit.framework/Headers/" || true
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
