@@ -43,6 +43,8 @@ struct SphereViewer: UIViewRepresentable {
         context.coordinator.cameraNode = cameraNode
         let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
         scnView.addGestureRecognizer(pan)
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        scnView.addGestureRecognizer(pinch)
 
         return scnView
     }
@@ -67,6 +69,13 @@ struct SphereViewer: UIViewRepresentable {
 
             cameraNode.eulerAngles = SCNVector3(pitch, yaw, 0)
             gesture.setTranslation(.zero, in: gesture.view)
+        }
+
+        /// Масштаб двумя пальцами — меняем угол обзора камеры (как зум в просмотрщиках 360°).
+        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            guard let camera = cameraNode?.camera else { return }
+            camera.fieldOfView = min(max(camera.fieldOfView / gesture.scale, 35), 100)
+            gesture.scale = 1
         }
     }
 }

@@ -7,109 +7,37 @@ import UIKit
 struct CaptureView: View {
     let onFinished: (URL) -> Void
 
-    @StateObject private var capture = CaptureSession()
-    @Environment(\.dismiss) private var dismiss
+    @State private var capture = CaptureSession()
     @State private var showResetConfirm = false
-
-    private let guideHalfFOVDeg: Float = 30
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         ZStack {
             ARViewRepresentable(session: capture.session, panels: capture.capturedPanels)
-            .ignoresSafeArea()
+                .ignoresSafeArea()
 
-            GeometryReader { geo in
-                ZStack {
-                    ForEach(capture.gridPoints.filter { !$0.captured }) { point in
-                        if let offset = screenOffset(for: point, in: geo.size) {
-                            MarkerView(isAligned: capture.alignedPointID == point.id)
-                                .position(x: geo.size.width / 2 + offset.x, y: geo.size.height / 2 + offset.y)
-                        }
-                    }
-
-                    if let arrow = nearestOffscreenDirection(in: geo.size) {
-                        Image(systemName: "location.north.fill")
-                            .font(.title)
-                            .foregroundStyle(.yellow)
-                            .rotationEffect(.radians(Double(arrow.angle)))
-                            .position(x: geo.size.width / 2 + arrow.point.x, y: geo.size.height / 2 + arrow.point.y)
-                    }
-
-                    Circle()
-                        .strokeBorder(.white, lineWidth: 2)
-                        .frame(width: 14, height: 14)
-                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                }
-            }
+            // Отдельный view: положение камеры меняется 60 раз в секунду, и
+            // перерисовываться из-за этого должны только метки, а не весь экран.
+            CaptureGuideOverlay(capture: capture)
+                .ignoresSafeArea()
 
             VStack {
-                Text(capture.statusText)
-                    .font(.headline)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(.black.opacity(0.6), in: Capsule())
-                    .foregroundStyle(.white)
-                    .padding(.top, 12)
-
+                CaptureProgressBadge(captured: capture.capturedCount, total: capture.gridPoints.count)
+                    .padding(.top, 8)
                 Spacer()
-
-                HStack(spacing: 20) {
-                    Button {
-                        capture.undoLastCapture()
-                    } label: {
-                        Image(systemName: "arrow.uturn.backward")
-                            .font(.title2)
-                            .foregroundStyle(.white)
-                            .padding(14)
-                            .background(.black.opacity(0.5), in: Circle())
-                    }
-                    .opacity(capture.canUndo ? 1 : 0.3)
-                    .disabled(!capture.canUndo)
-
-                    Button {
-                        showResetConfirm = true
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.title2)
-                            .foregroundStyle(.white)
-                            .padding(14)
-                            .background(.black.opacity(0.5), in: Circle())
-                    }
-                    .opacity(capture.canUndo ? 1 : 0.3)
-                    .disabled(!capture.canUndo)
-
-                    Spacer()
-
-                    Button {
-                        capture.toggleTorch()
-                    } label: {
-                        Image(systemName: capture.isTorchOn ? "bolt.fill" : "bolt.slash.fill")
-                            .font(.title2)
-                            .foregroundStyle(capture.isTorchOn ? .yellow : .white)
-                            .padding(14)
-                            .background(.black.opacity(0.5), in: Circle())
-                    }
-
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.title2)
-                            .foregroundStyle(.white)
-                            .padding(14)
-                            .background(.black.opacity(0.5), in: Circle())
-                    }
-                }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 40)
+                controls
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
             }
         }
+        .sensoryFeedback(.impact(weight: .medium), trigger: capture.capturedCount) { old, new in new > old }
         .onAppear {
             capture.start()
             UIApplication.shared.isIdleTimerDisabled = true
         }
         .onDisappear {
             capture.stop()
+            capture.discardIfUnfinished()
             UIApplication.shared.isIdleTimerDisabled = false
         }
         .onChange(of: capture.isFinished) { _, finished in
@@ -123,6 +51,107 @@ struct CaptureView: View {
         }
     }
 
+    private var controls: some View {
+        GlassGroup(spacing: 14) {
+            HStack(spacing: 14) {
+                GlassIconButton(title: "Отменить последний кадр", systemImage: "arrow.uturn.backward") {
+                    capture.undoLastCapture()
+                }
+                .disabled(!capture.canUndo)
+                .opacity(capture.canUndo ? 1 : 0.4)
+
+                GlassIconButton(title: "Начать заново", systemImage: "trash") {
+                    showResetConfirm = true
+                }
+                .disabled(!capture.canUndo)
+                .opacity(capture.canUndo ? 1 : 0.4)
+
+                Spacer()
+
+                GlassIconButton(
+                    title: capture.isTorchOn ? "Выключить фонарик" : "Включить фонарик",
+                    systemImage: capture.isTorchOn ? "flashlight.on.fill" : "flashlight.off.fill",
+                    tint: capture.isTorchOn ? .yellow : .white
+                ) {
+                    capture.toggleTorch()
+                }
+
+                GlassIconButton(title: "Закрыть", systemImage: "xmark") {
+                    dismiss()
+                }
+            }
+        }
+    }
+}
+
+/// "Снято 12 из 31" с полоской прогресса.
+private struct CaptureProgressBadge: View {
+    let captured: Int
+    let total: Int
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text(captured == 0 ? "Наведи кружок на точку и замри" : "Снято \(captured) из \(total)")
+                .font(.subheadline.weight(.semibold))
+                .contentTransition(.numericText())
+                .animation(.snappy, value: captured)
+            ProgressView(value: Double(captured), total: Double(max(total, 1)))
+                .tint(Color.panoAccent)
+                .frame(width: 180)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .glassSurface(in: Capsule())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Метки точек сетки, стрелка к ближайшей неснятой точке и прицел в центре.
+private struct CaptureGuideOverlay: View {
+    let capture: CaptureSession
+
+    private let guideHalfFOV: Float = 30 * .pi / 180
+
+    var body: some View {
+        GeometryReader { geo in
+            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+            ZStack {
+                ForEach(visibleMarkers(in: geo.size)) { marker in
+                    TargetMarker(isAligned: marker.isAligned)
+                        .position(x: center.x + marker.offset.x, y: center.y + marker.offset.y)
+                }
+
+                if let arrow = nearestOffscreenDirection(in: geo.size) {
+                    Image(systemName: "arrow.up")
+                        .font(.title2.weight(.bold))
+                        .foregroundStyle(Color.panoAccent)
+                        .frame(width: 48, height: 48)
+                        .glassSurface(in: Circle())
+                        .rotationEffect(.radians(Double(arrow.angle)))
+                        .position(x: center.x + arrow.point.x, y: center.y + arrow.point.y)
+                }
+
+                Reticle(isAligned: capture.alignedPointID != nil)
+                    .position(center)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private struct VisibleMarker: Identifiable {
+        let id: GridPoint.ID
+        let offset: CGPoint
+        let isAligned: Bool
+    }
+
+    private func visibleMarkers(in size: CGSize) -> [VisibleMarker] {
+        capture.gridPoints.compactMap { point in
+            guard !point.captured, let offset = screenOffset(for: point, in: size) else { return nil }
+            return VisibleMarker(id: point.id, offset: offset, isAligned: capture.alignedPointID == point.id)
+        }
+    }
+
     private func yawDelta(to point: GridPoint) -> Float {
         point.ignoresYaw ? 0 : angularDifference(point.yaw, capture.currentYaw)
     }
@@ -130,53 +159,67 @@ struct CaptureView: View {
     private func screenOffset(for point: GridPoint, in size: CGSize) -> CGPoint? {
         let dYaw = yawDelta(to: point)
         let dPitch = point.pitch - capture.currentPitch
-        let halfFOV = guideHalfFOVDeg * .pi / 180
-        guard abs(dYaw) < halfFOV, abs(dPitch) < halfFOV else { return nil }
-        let x = CGFloat(dYaw / halfFOV) * (size.width / 2)
-        let y = CGFloat(-dPitch / halfFOV) * (size.height / 2)
+        guard abs(dYaw) < guideHalfFOV, abs(dPitch) < guideHalfFOV else { return nil }
+        let x = CGFloat(dYaw / guideHalfFOV) * (size.width / 2)
+        let y = CGFloat(-dPitch / guideHalfFOV) * (size.height / 2)
         return CGPoint(x: x, y: y)
     }
 
     private func nearestOffscreenDirection(in size: CGSize) -> (point: CGPoint, angle: Float)? {
         let remaining = capture.gridPoints.filter { !$0.captured }
-        guard let target = remaining.min(by: {
-            squaredDistance(from: $0) < squaredDistance(from: $1)
-        }) else { return nil }
+        guard let target = remaining.min(by: { squaredDistance(to: $0) < squaredDistance(to: $1) }) else { return nil }
 
         let dYaw = yawDelta(to: target)
         let dPitch = target.pitch - capture.currentPitch
-        let halfFOV = guideHalfFOVDeg * .pi / 180
-        if abs(dYaw) < halfFOV, abs(dPitch) < halfFOV { return nil }
+        if abs(dYaw) < guideHalfFOV, abs(dPitch) < guideHalfFOV { return nil }
 
         let angle = atan2(dYaw, dPitch)
-        let radius = min(size.width, size.height) / 2 - 40
-        let point = CGPoint(x: CGFloat(sin(angle)) * radius, y: CGFloat(-cos(angle)) * radius)
-        return (point, angle)
+        let radius = min(size.width, size.height) / 2 - 56
+        return (CGPoint(x: CGFloat(sin(angle)) * radius, y: CGFloat(-cos(angle)) * radius), angle)
     }
 
-    private func squaredDistance(from point: GridPoint) -> Float {
+    private func squaredDistance(to point: GridPoint) -> Float {
         let dYaw = yawDelta(to: point)
         let dPitch = point.pitch - capture.currentPitch
         return dYaw * dYaw + dPitch * dPitch
     }
 }
 
-private struct MarkerView: View {
+private struct TargetMarker: View {
     let isAligned: Bool
 
     var body: some View {
-        let size: CGFloat = isAligned ? 46 : 36
         Circle()
-            .strokeBorder(isAligned ? Color.yellow : Color.white, lineWidth: isAligned ? 4 : 2)
-            .frame(width: size, height: size)
+            .fill(isAligned ? Color.panoAccent.opacity(0.35) : .clear)
+            .overlay(
+                Circle().strokeBorder(isAligned ? Color.panoAccent : .white.opacity(0.9), lineWidth: isAligned ? 4 : 2)
+            )
+            .frame(width: isAligned ? 50 : 34, height: isAligned ? 50 : 34)
+            .shadow(color: .black.opacity(0.4), radius: 4)
+            .animation(.snappy, value: isAligned)
     }
 }
 
-/// Показывает живую картинку камеры (через ARSCNView) и "приклеивает" миниатюры
-/// снятых кадров прямо в 3D-пространство сессии ARKit — в тех направлениях, где
-/// они были сняты. Поэтому при повороте телефона они естественно поворачиваются
-/// и меняют перспективу вместе с камерой, как настоящие объекты в пространстве,
-/// а не плоская накладка поверх экрана.
+private struct Reticle: View {
+    let isAligned: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(isAligned ? Color.panoAccent : .white, lineWidth: 2.5)
+                .frame(width: 66, height: 66)
+            Circle()
+                .fill(isAligned ? Color.panoAccent : .white)
+                .frame(width: 6, height: 6)
+        }
+        .shadow(color: .black.opacity(0.5), radius: 3)
+        .scaleEffect(isAligned ? 1.12 : 1)
+        .animation(.snappy, value: isAligned)
+    }
+}
+
+/// Живая картинка камеры (ARSCNView) плюс миниатюры снятых кадров, "приклеенные"
+/// в 3D-пространство сессии ARKit там, где они были сняты.
 private struct ARViewRepresentable: UIViewRepresentable {
     let session: ARSession
     let panels: [GridPoint.ID: CapturedPanel]
@@ -216,9 +259,8 @@ private struct ARViewRepresentable: UIViewRepresentable {
 
         /// Плоскость ставится ровно туда, где в момент снимка была "картинка" камеры:
         /// в её же системе координат, на расстоянии `distance` перед объективом,
-        /// размером с реальный угол обзора. Оси плоскости совпадают с осями камеры,
-        /// поэтому снимок не зеркалится и не поворачивается, а соседние кадры
-        /// перекрываются так же, как перекрываются настоящие фото.
+        /// размером с реальный угол обзора — поэтому соседние кадры перекрываются
+        /// так же, как настоящие фото, без зеркалирования и поворотов.
         private static func makePlaneNode(panel: CapturedPanel) -> SCNNode {
             let distance: Float = 2
             let plane = SCNPlane(

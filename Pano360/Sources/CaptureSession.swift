@@ -4,7 +4,7 @@ import CoreLocation
 import simd
 import UIKit
 
-struct GridPoint: Identifiable {
+struct GridPoint: Identifiable, Equatable {
     let id = UUID()
     let yaw: Float   // радианы, 0 = направление в момент старта
     let pitch: Float // радианы, 0 = горизонт
@@ -30,33 +30,36 @@ private struct CaptureHistoryEntry {
     let fileName: String
 }
 
-final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLocationManagerDelegate {
+/// Состояние съёмки. Наблюдаемые свойства меняются только в главном потоке;
+/// служебные поля, которые трогает поток ARKit, исключены из наблюдения.
+@Observable
+final class CaptureSession: NSObject, ARSessionDelegate, CLLocationManagerDelegate {
     let session = ARSession()
     private let locationManager = CLLocationManager()
-    private var lastLocation: CLLocation?
+    @ObservationIgnored private var lastLocation: CLLocation?
 
-    @Published var gridPoints: [GridPoint]
-    @Published var currentYaw: Float = 0
-    @Published var currentPitch: Float = 0
-    @Published var alignedPointID: GridPoint.ID?
-    @Published var isFinished = false
-    @Published var statusText = "Наведи камеру и поворачивайся по кругу"
-    @Published var canUndo = false
-    @Published var capturedPanels: [GridPoint.ID: CapturedPanel] = [:]
-    @Published var isTorchOn = false
+    private(set) var gridPoints: [GridPoint]
+    private(set) var currentYaw: Float = 0
+    private(set) var currentPitch: Float = 0
+    private(set) var alignedPointID: GridPoint.ID?
+    private(set) var isFinished = false
+    private(set) var capturedCount = 0
+    private(set) var capturedPanels: [GridPoint.ID: CapturedPanel] = [:]
+    private(set) var isTorchOn = false
+
+    var canUndo: Bool { capturedCount > 0 }
 
     private let captureToleranceDeg: Float = 6
     private let stabilizeSeconds: TimeInterval = 0.4
-    private var alignedSince: Date?
-    private var isSaving = false
-    private var frameIndex = 0
-    private var useHighResolution = true
+    @ObservationIgnored private var alignedSince: Date?
+    @ObservationIgnored private var isSaving = false
+    @ObservationIgnored private var frameIndex = 0
+    @ObservationIgnored private var useHighResolution = true
 
     let outputDirectory: URL
-    private var manifestEntries: [[String: Any]] = []
-    private var captureHistory: [CaptureHistoryEntry] = []
+    @ObservationIgnored private var manifestEntries: [[String: Any]] = []
+    @ObservationIgnored private var captureHistory: [CaptureHistoryEntry] = []
     private let ciContext = CIContext()
-    private let haptics = UIImpactFeedbackGenerator(style: .medium)
 
     override init() {
         var points: [GridPoint] = []
@@ -83,15 +86,14 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
 
         let sessionName = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
-        outputDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Captures")
-            .appendingPathComponent(sessionName)
-
+        outputDirectory = CaptureLibrary.rootDirectory.appendingPathComponent(sessionName)
         super.init()
-        try? FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
     }
 
     func start() {
+        // Папку создаём только при реальном старте: SwiftUI может создать лишние
+        // экземпляры модели, и они не должны оставлять пустые папки в галерее.
+        try? FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         session.delegate = self
         let config = ARWorldTrackingConfiguration()
         if let format = Self.preferredVideoFormat() {
@@ -206,7 +208,7 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
             process(frame: currentFrame, for: point, isHighResolution: false)
             return
         }
-        session.captureHighResolutionFrame { [weak self] highResFrame, _ in
+        let completion: (ARFrame?, Error?) -> Void = { [weak self] highResFrame, _ in
             guard let self else { return }
             if let highResFrame {
                 self.process(frame: highResFrame, for: point, isHighResolution: true)
@@ -215,14 +217,20 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 self.isSaving = false
             }
         }
+        if #available(iOS 26.0, *) {
+            // Без звука затвора — отклик даёт вибрация. Там, где звук обязателен
+            // по закону, система всё равно его оставит.
+            let settings = AVCapturePhotoSettings()
+            settings.isShutterSoundSuppressionEnabled = true
+            session.captureHighResolutionFrame(using: settings, completion: completion)
+        } else {
+            session.captureHighResolutionFrame(completion: completion)
+        }
     }
 
     private func process(frame: ARFrame, for point: GridPoint, isHighResolution: Bool) {
         frameIndex += 1
         let index = frameIndex
-        DispatchQueue.main.async {
-            self.haptics.impactOccurred()
-        }
 
         // Рендерим картинку сразу: буфер кадра ARKit переиспользуется и после
         // возврата из колбэка может быть перезаписан. Сохраняем БЕЗ поворота —
@@ -285,13 +293,11 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
                 }
                 self.captureHistory.append(CaptureHistoryEntry(pointID: point.id, fileName: fileName))
                 self.capturedPanels[point.id] = panel
-                self.canUndo = true
+                self.capturedCount = self.captureHistory.count
                 self.alignedPointID = nil
                 self.isSaving = false
-                let done = self.gridPoints.filter { $0.captured }.count
-                self.statusText = "Снято \(done) из \(self.gridPoints.count)"
 
-                if done == self.gridPoints.count {
+                if self.capturedCount == self.gridPoints.count {
                     self.finish()
                 }
             }
@@ -306,9 +312,13 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         capturedPanels[last.pointID] = nil
         manifestEntries.removeAll { ($0["file"] as? String) == last.fileName }
         try? FileManager.default.removeItem(at: outputDirectory.appendingPathComponent(last.fileName))
-        canUndo = !captureHistory.isEmpty
-        let done = gridPoints.filter { $0.captured }.count
-        statusText = "Кадр отменён. Снято \(done) из \(gridPoints.count)"
+        capturedCount = captureHistory.count
+    }
+
+    /// Съёмку закрыли, не досняв: кадры без manifest.json склеить нельзя — удаляем папку.
+    func discardIfUnfinished() {
+        guard !isFinished else { return }
+        try? FileManager.default.removeItem(at: outputDirectory)
     }
 
     /// Сбрасывает всю съёмку: удаляет уже снятые кадры и начинает сетку точек заново.
@@ -324,10 +334,9 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
         for idx in gridPoints.indices {
             gridPoints[idx].captured = false
         }
-        canUndo = false
+        capturedCount = 0
         alignedSince = nil
         alignedPointID = nil
-        statusText = "Наведи камеру и поворачивайся по кругу"
     }
 
     private func makeThumbnail(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
@@ -344,7 +353,6 @@ final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate, CLLoc
 
     private func finish() {
         isFinished = true
-        statusText = "Готово! Снято \(gridPoints.count) кадров"
 
         var manifest: [String: Any] = ["frames": manifestEntries]
         if let coordinate = lastLocation?.coordinate {

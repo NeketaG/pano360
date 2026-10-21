@@ -1,77 +1,108 @@
 import SwiftUI
 
-private enum Flow: Equatable {
-    case idle
-    case capturing
-    case stitching(URL)
+enum Route: Hashable {
     case gallery
+    case panorama(URL)
 }
 
 struct ContentView: View {
-    @State private var flow: Flow = .idle
+    @State private var path: [Route] = []
+    @State private var isCapturing = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Pano360")
-                .font(.largeTitle.bold())
-            Text("Сними панораму 360°, следуя за точками на экране.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
-
-            Button {
-                flow = .capturing
-            } label: {
-                Text("Начать съёмку")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding()
-            }
-            .buttonStyle(.borderedProminent)
-            .padding(.horizontal, 40)
-            .padding(.top, 8)
-
-            Button {
-                flow = .gallery
-            } label: {
-                Text("Мои панорамы")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding()
-            }
-            .buttonStyle(.bordered)
-            .padding(.horizontal, 40)
+        NavigationStack(path: $path) {
+            HomeView { isCapturing = true }
+                .navigationDestination(for: Route.self) { route in
+                    switch route {
+                    case .gallery:
+                        GalleryView()
+                    case .panorama(let directory):
+                        StitchView(sessionDirectory: directory)
+                    }
+                }
         }
-        .padding()
-        .fullScreenCover(isPresented: Binding(
-            get: { flow == .capturing },
-            set: { isPresented in if !isPresented { flow = .idle } }
-        )) {
+        .fullScreenCover(isPresented: $isCapturing) {
             CaptureView { directory in
-                flow = .stitching(directory)
+                isCapturing = false
+                path.append(.panorama(directory))
             }
         }
-        .fullScreenCover(isPresented: Binding(
-            get: {
-                if case .stitching = flow { return true }
-                return false
-            },
-            set: { isPresented in if !isPresented { flow = .idle } }
-        )) {
-            if case .stitching(let directory) = flow {
-                StitchView(sessionDirectory: directory) {
-                    flow = .idle
+    }
+}
+
+private struct HomeView: View {
+    let onCapture: () -> Void
+
+    @State private var backdrop: UIImage?
+
+    var body: some View {
+        ZStack {
+            background
+
+            VStack(alignment: .leading, spacing: 28) {
+                Spacer()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Image(systemName: "pano.fill")
+                        .font(.system(size: 34, weight: .semibold))
+                        .foregroundStyle(Color.panoAccent)
+                    Text("Pano360")
+                        .font(.system(size: 52, weight: .bold, design: .rounded))
+                    Text("Сферические панорамы 360°. Снимай по точкам — склейка прямо на телефоне.")
+                        .font(.title3)
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+
+                VStack(spacing: 12) {
+                    Button(action: onCapture) {
+                        Label("Снять панораму", systemImage: "camera.fill")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .primaryActionStyle()
+
+                    NavigationLink(value: Route.gallery) {
+                        Label("Мои панорамы", systemImage: "square.stack.fill")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .secondaryActionStyle()
                 }
             }
+            .foregroundStyle(.white)
+            .padding(24)
         }
-        .sheet(isPresented: Binding(
-            get: { flow == .gallery },
-            set: { isPresented in if !isPresented { flow = .idle } }
-        )) {
-            GalleryView(
-                onClose: { flow = .idle },
-                onOpen: { directory in flow = .stitching(directory) }
+        .toolbar(.hidden, for: .navigationBar) // toolbarVisibility — только с iOS 18
+        .task {
+            let image = await Self.loadLatestPanorama()
+            withAnimation(.easeInOut(duration: 0.8)) { backdrop = image }
+        }
+    }
+
+    @ViewBuilder
+    private var background: some View {
+        if let backdrop {
+            PanoramaBackdrop(image: backdrop)
+                .transition(.opacity)
+        } else {
+            LinearGradient(
+                colors: [Color(red: 0.05, green: 0.12, blue: 0.22), .black],
+                startPoint: .top, endPoint: .bottom
             )
+            .ignoresSafeArea()
         }
+        // Затемнение снизу, чтобы текст и кнопки читались на любой панораме
+        LinearGradient(
+            colors: [.black.opacity(0.15), .black.opacity(0.35), .black.opacity(0.85)],
+            startPoint: .top, endPoint: .bottom
+        )
+        .ignoresSafeArea()
+    }
+
+    private static func loadLatestPanorama() async -> UIImage? {
+        await Task.detached(priority: .utility) {
+            guard let latest = CaptureLibrary.load().first(where: { $0.hasPanorama }) else { return nil }
+            return CaptureLibrary.thumbnail(for: latest, maxPixelSize: 3000)
+        }.value
     }
 }

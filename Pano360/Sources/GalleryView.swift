@@ -1,110 +1,118 @@
 import SwiftUI
 
-private struct GalleryEntry: Identifiable {
-    let id: URL
-    let date: Date
-    let hasPanorama: Bool
-    let thumbnail: UIImage?
-}
-
 struct GalleryView: View {
-    let onClose: () -> Void
-    let onOpen: (URL) -> Void
-
-    @State private var entries: [GalleryEntry] = []
+    @State private var captures: [SavedCapture] = []
+    @State private var isLoaded = false
+    @State private var pendingDeletion: SavedCapture?
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if entries.isEmpty {
-                    Text("Пока нет снятых панорам")
-                        .foregroundStyle(.secondary)
-                } else {
-                    List {
-                        ForEach(entries) { entry in
-                            Button {
-                                onOpen(entry.id)
-                            } label: {
-                                row(for: entry)
-                            }
-                            .foregroundStyle(.primary)
+        ScrollView {
+            LazyVStack(spacing: 18) {
+                ForEach(captures) { capture in
+                    NavigationLink(value: Route.panorama(capture.id)) {
+                        GalleryCard(capture: capture)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("Удалить", systemImage: "trash", role: .destructive) {
+                            pendingDeletion = capture
                         }
-                        .onDelete(perform: delete)
                     }
                 }
             }
-            .navigationTitle("Мои панорамы")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Готово") { onClose() }
-                }
-                if !entries.isEmpty {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        EditButton()
-                    }
-                }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+        .overlay {
+            if isLoaded && captures.isEmpty {
+                ContentUnavailableView(
+                    "Пока нет панорам",
+                    systemImage: "pano",
+                    description: Text("Сними первую — кнопка на главном экране.")
+                )
             }
-            .onAppear { loadEntries() }
+        }
+        .background(Color.black.ignoresSafeArea())
+        .navigationTitle("Мои панорамы")
+        .confirmationDialog(
+            "Удалить панораму?",
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { capture in
+            Button("Удалить", role: .destructive) { delete(capture) }
+        } message: { _ in
+            Text("Будут удалены все кадры этой съёмки.")
+        }
+        .task {
+            captures = await Self.loadCaptures()
+            isLoaded = true
         }
     }
 
-    private func row(for entry: GalleryEntry) -> some View {
-        HStack(spacing: 12) {
+    private func delete(_ capture: SavedCapture) {
+        CaptureLibrary.delete(capture)
+        withAnimation(.snappy) {
+            captures.removeAll { $0.id == capture.id }
+        }
+    }
+
+    private static func loadCaptures() async -> [SavedCapture] {
+        await Task.detached(priority: .userInitiated) { CaptureLibrary.load() }.value
+    }
+}
+
+private struct GalleryCard: View {
+    let capture: SavedCapture
+
+    @State private var thumbnail: UIImage?
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
             Group {
-                if let thumbnail = entry.thumbnail {
+                if let thumbnail {
                     Image(uiImage: thumbnail)
                         .resizable()
                         .scaledToFill()
                 } else {
                     Rectangle()
-                        .fill(Color.gray.opacity(0.3))
-                        .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
+                        .fill(Color.white.opacity(0.06))
+                        .overlay {
+                            Image(systemName: capture.hasPanorama ? "photo" : "pano")
+                                .font(.largeTitle)
+                                .foregroundStyle(.secondary)
+                        }
                 }
             }
-            .frame(width: 64, height: 64)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .frame(maxWidth: .infinity)
+            .aspectRatio(2, contentMode: .fit)
+            .clipped()
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.date, style: .date)
-                Text(entry.date, style: .time)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if !entry.hasPanorama {
-                    Text("Не собрана")
-                        .font(.caption)
+            HStack(spacing: 8) {
+                Text(capture.date, format: .dateTime.day().month(.wide).hour().minute())
+                    .font(.subheadline.weight(.semibold))
+                if !capture.hasPanorama {
+                    Text("ещё не склеена")
+                        .font(.caption.weight(.medium))
                         .foregroundStyle(.orange)
                 }
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .glassSurface(in: Capsule())
+            .padding(12)
         }
-    }
-
-    private func loadEntries() {
-        let capturesDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Captures")
-        guard let sessionDirs = try? FileManager.default.contentsOfDirectory(
-            at: capturesDir, includingPropertiesForKeys: [.contentModificationDateKey], options: []
-        ) else {
-            entries = []
-            return
+        .clipShape(.rect(cornerRadius: 24))
+        .contentShape(.rect(cornerRadius: 24))
+        .accessibilityElement(children: .combine)
+        .task(id: capture.id) {
+            let capture = capture
+            thumbnail = await Task.detached(priority: .utility) {
+                CaptureLibrary.thumbnail(for: capture, maxPixelSize: 1400)
+            }.value
         }
-
-        entries = sessionDirs.compactMap { dir -> GalleryEntry? in
-            guard (try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { return nil }
-            let date = (try? dir.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
-            let panoURL = dir.appendingPathComponent("panorama.jpg")
-            let hasPano = FileManager.default.fileExists(atPath: panoURL.path)
-            // Панорама 8192×4096 — для превью декодируем только уменьшенную копию
-            let thumbnail = hasPano
-                ? PanoramaStitcher.downsampledImage(at: panoURL, maxPixelSize: 256).map { UIImage(cgImage: $0.image) }
-                : nil
-            return GalleryEntry(id: dir, date: date, hasPanorama: hasPano, thumbnail: thumbnail)
-        }.sorted { $0.date > $1.date }
-    }
-
-    private func delete(at offsets: IndexSet) {
-        for index in offsets {
-            try? FileManager.default.removeItem(at: entries[index].id)
-        }
-        entries.remove(atOffsets: offsets)
     }
 }
