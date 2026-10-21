@@ -10,6 +10,11 @@ struct GridPoint: Identifiable, Equatable {
     let pitch: Float // радианы, 0 = горизонт
     var ignoresYaw = false // зенит/надир: азимут не важен, важен только угол вверх/вниз
     var captured = false
+
+    /// Направление на точку (единичный вектор в системе ARKit: y вверх, −z вперёд при старте).
+    var direction: SIMD3<Float> {
+        SIMD3<Float>(cos(pitch) * sin(yaw), sin(pitch), -cos(pitch) * cos(yaw))
+    }
 }
 
 func angularDifference(_ a: Float, _ b: Float) -> Float {
@@ -49,8 +54,8 @@ final class CaptureSession: NSObject, ARSessionDelegate, CLLocationManagerDelega
 
     var canUndo: Bool { capturedCount > 0 }
 
-    private let captureToleranceDeg: Float = 6
-    private let stabilizeSeconds: TimeInterval = 0.4
+    private let captureToleranceDeg: Float = 7
+    private let stabilizeSeconds: TimeInterval = 0.35
     @ObservationIgnored private var alignedSince: Date?
     @ObservationIgnored private var isSaving = false
     @ObservationIgnored private var frameIndex = 0
@@ -169,7 +174,7 @@ final class CaptureSession: NSObject, ARSessionDelegate, CLLocationManagerDelega
 
         guard !isSaving, !isFinished else { return }
 
-        if let target = nearestUncapturedPoint(toYaw: yaw, pitch: pitch) {
+        if let target = alignedUncapturedPoint(forward: forward) {
             DispatchQueue.main.async { self.alignedPointID = target.id }
             if let since = alignedSince {
                 if Date().timeIntervalSince(since) >= stabilizeSeconds {
@@ -190,14 +195,20 @@ final class CaptureSession: NSObject, ARSessionDelegate, CLLocationManagerDelega
         return -normalize(zAxis)
     }
 
-    private func nearestUncapturedPoint(toYaw yaw: Float, pitch: Float) -> GridPoint? {
-        let toleranceRad = captureToleranceDeg * .pi / 180
-        return gridPoints.first { point in
-            guard !point.captured else { return false }
-            let pitchTolerance = point.ignoresYaw ? toleranceRad * 1.5 : toleranceRad
-            guard abs(pitch - point.pitch) < pitchTolerance else { return false }
-            return point.ignoresYaw || abs(angularDifference(yaw, point.yaw)) < toleranceRad
+    /// Неснятая точка, на которую сейчас смотрит камера. Попадание считается по
+    /// настоящему углу между направлениями — одинаково для горизонта, рядов ±45° и полюсов.
+    private func alignedUncapturedPoint(forward: SIMD3<Float>) -> GridPoint? {
+        let minCos = cos(captureToleranceDeg * .pi / 180)
+        var best: GridPoint?
+        var bestCos = minCos
+        for point in gridPoints where !point.captured {
+            let c = dot(forward, point.direction)
+            if c > bestCos {
+                bestCos = c
+                best = point
+            }
         }
+        return best
     }
 
     /// Пытаемся снять полноразмерное фото с сенсора (у видеопотока ARKit всего ~2 Мп).

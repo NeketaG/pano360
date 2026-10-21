@@ -142,26 +142,20 @@ private struct CaptureGuideOverlay: View {
         point.ignoresYaw ? 0 : angularDifference(point.yaw, capture.currentYaw)
     }
 
+    /// Стрелка нужна, пока ближайшая точка ещё не проявилась рядом с прицелом.
     private func nearestOffscreenDirection(in size: CGSize) -> (point: CGPoint, angle: Float)? {
+        let yaw = capture.currentYaw
+        let pitch = capture.currentPitch
+        let forward = SIMD3<Float>(cos(pitch) * sin(yaw), sin(pitch), -cos(pitch) * cos(yaw))
         let remaining = capture.gridPoints.filter { !$0.captured }
-        guard let target = remaining.min(by: { squaredDistance(to: $0) < squaredDistance(to: $1) }) else { return nil }
+        guard let target = remaining.max(by: { dot(forward, $0.direction) < dot(forward, $1.direction) }) else { return nil }
 
-        // Видимая область 3D-вида (горизонтальный угол задан в CaptureSpaceView)
-        let halfX = CaptureSpaceView.horizontalFOVDegrees / 2 * .pi / 180
-        let halfY = atan(tan(halfX) * Float(size.height / max(size.width, 1)))
-        let dYaw = yawDelta(to: target)
-        let dPitch = target.pitch - capture.currentPitch
-        if abs(dYaw) < halfX * 0.85, abs(dPitch) < halfY * 0.85 { return nil }
+        let distanceDegrees = acos(max(-1, min(1, dot(forward, target.direction)))) * 180 / .pi
+        guard distanceDegrees > 18 else { return nil }
 
-        let angle = atan2(dYaw, dPitch)
+        let angle = atan2(yawDelta(to: target), target.pitch - pitch)
         let radius = min(size.width, size.height) / 2 - 56
         return (CGPoint(x: CGFloat(sin(angle)) * radius, y: CGFloat(-cos(angle)) * radius), angle)
-    }
-
-    private func squaredDistance(to point: GridPoint) -> Float {
-        let dYaw = yawDelta(to: point)
-        let dPitch = point.pitch - capture.currentPitch
-        return dYaw * dYaw + dPitch * dPitch
     }
 }
 
@@ -190,6 +184,8 @@ private struct Reticle: View {
 private struct CaptureSpaceView: UIViewRepresentable {
     static let horizontalFOVDegrees: Float = 80
     static let spaceColor = UIColor(white: 0.11, alpha: 1)
+    static let markerFullDegrees: Float = 12
+    static let markerFadeEndDegrees: Float = 24
 
     let session: ARSession
     let panels: [GridPoint.ID: CapturedPanel]
@@ -230,6 +226,11 @@ private struct CaptureSpaceView: UIViewRepresentable {
         private var targetNodes: [GridPoint.ID: SCNNode] = [:]
         private var alignedID: GridPoint.ID?
 
+        /// Точки-цели живут в узле, который каждый кадр переносится в позицию телефона.
+        /// Иначе при сдвиге руки на 20–30 см маркер на расстоянии 2 м "уезжает" на
+        /// 6–8° от направления, по которому на самом деле срабатывает съёмка.
+        private let targetsRoot = SCNNode()
+
         /// Видоискатель чуть ближе снятых кадров (2 м) — живая картинка поверх них.
         private let viewfinderDistance: Float = 1.95
 
@@ -254,6 +255,7 @@ private struct CaptureSpaceView: UIViewRepresentable {
             viewfinderMaterial.isDoubleSided = true
             viewfinderMaterial.diffuse.contents = UIColor.black
             scene.rootNode.addChildNode(viewfinder)
+            scene.rootNode.addChildNode(targetsRoot)
         }
 
         // MARK: каждый кадр (поток отрисовки SceneKit)
@@ -263,6 +265,22 @@ private struct CaptureSpaceView: UIViewRepresentable {
             // Поза для портретной ориентации экрана — так её отдаёт сам ARKit
             cameraNode.simdTransform = frame.camera.viewMatrix(for: .portrait).inverse
             updateViewfinder(with: frame, time: time)
+            updateTargets(cameraTransform: frame.camera.transform)
+        }
+
+        /// Маркеры видны только рядом с прицелом: полностью — ближе 12°, дальше плавно
+        /// гаснут и исчезают к 24°. Путь к дальним точкам показывает стрелка.
+        private func updateTargets(cameraTransform: simd_float4x4) {
+            let position = cameraTransform.columns.3
+            targetsRoot.simdPosition = SIMD3<Float>(position.x, position.y, position.z)
+            let forward = -normalize(SIMD3<Float>(cameraTransform.columns.2.x, cameraTransform.columns.2.y, cameraTransform.columns.2.z))
+            for node in targetsRoot.childNodes {
+                let direction = normalize(node.simdPosition)
+                let angle = acos(max(-1, min(1, dot(forward, direction)))) * 180 / .pi
+                let visibility = min(1, max(0, (CaptureSpaceView.markerFadeEndDegrees - angle)
+                    / (CaptureSpaceView.markerFadeEndDegrees - CaptureSpaceView.markerFullDegrees)))
+                node.opacity = CGFloat(visibility)
+            }
         }
 
         private func updateViewfinder(with frame: ARFrame, time: TimeInterval) {
@@ -350,7 +368,7 @@ private struct CaptureSpaceView: UIViewRepresentable {
             }
             for point in targets where targetNodes[point.id] == nil {
                 let node = Self.makeTargetNode(point)
-                scene.rootNode.addChildNode(node)
+                targetsRoot.addChildNode(node)
                 targetNodes[point.id] = node
             }
             if alignedID != self.alignedID {
@@ -380,7 +398,7 @@ private struct CaptureSpaceView: UIViewRepresentable {
         }
 
         private static func makeTargetNode(_ point: GridPoint) -> SCNNode {
-            let plane = SCNPlane(width: 0.17, height: 0.17)
+            let plane = SCNPlane(width: 0.3, height: 0.3)
             let material = SCNMaterial()
             material.lightingModel = .constant
             material.isDoubleSided = true
@@ -392,19 +410,15 @@ private struct CaptureSpaceView: UIViewRepresentable {
             let node = SCNNode(geometry: plane)
             node.renderingOrder = 10
             node.constraints = [SCNBillboardConstraint()]
-            let direction = SIMD3<Float>(
-                cos(point.pitch) * sin(point.yaw),
-                sin(point.pitch),
-                -cos(point.pitch) * cos(point.yaw)
-            )
-            node.simdPosition = direction * 2
+            node.simdPosition = point.direction * 2
+            node.opacity = 0
             styleTarget(node, aligned: false)
             return node
         }
 
         private static func styleTarget(_ node: SCNNode?, aligned: Bool) {
             node?.geometry?.firstMaterial?.diffuse.contents = aligned ? alignedTargetImage : targetImage
-            node?.scale = aligned ? SCNVector3(1.35, 1.35, 1.35) : SCNVector3(1, 1, 1)
+            node?.scale = aligned ? SCNVector3(1.25, 1.25, 1.25) : SCNVector3(1, 1, 1)
         }
 
         private static let targetImage = ringImage(fill: .clear, stroke: .white)
